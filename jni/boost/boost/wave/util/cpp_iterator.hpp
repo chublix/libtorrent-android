@@ -202,13 +202,14 @@ bool has_parameters = false;
     boost::wave::util::retrieve_macrodefinition(*hit.trees.begin(),
         BOOST_WAVE_MACRO_DEFINITION_ID, macrodefinition, act_pos, true);
 
+    // get rid of trailing T_EOF
+    if (!macrodefinition.empty() && token_id(macrodefinition.back()) == T_EOF)
+        macrodefinition.resize(macrodefinition.size()-1);
+
 //  If no macrodefinition is given, and the macro string does not end with a
 //  '=', then the macro should be defined with the value '1'
-    if (0 == macrodefinition.size() &&
-        '=' != macrostring[macrostring.size()-1])
-    {
+    if (macrodefinition.empty() && '=' != macrostring[macrostring.size()-1])
         macrodefinition.push_back(token_type(T_INTLIT, "1", act_pos));
-    }
 
 // add the new macro to the macromap
     return ctx.add_macro_definition(macroname, has_parameters, macroparameters,
@@ -466,7 +467,8 @@ namespace impl {
     template <typename ContextT>
     bool consider_emitting_line_directive(ContextT const& ctx, token_id id)
     {
-        if (need_preserve_comments(ctx.get_language())) {
+        if (need_preserve_comments(ctx.get_language()))
+        {
             if (!IS_CATEGORY(id, EOLTokenType) && !IS_CATEGORY(id, EOFTokenType))
             {
                 return true;
@@ -475,7 +477,7 @@ namespace impl {
         if (!IS_CATEGORY(id, WhiteSpaceTokenType) &&
             !IS_CATEGORY(id, EOLTokenType) && !IS_CATEGORY(id, EOFTokenType))
         {
-          return true;
+            return true;
         }
         return false;
     }
@@ -492,13 +494,17 @@ pp_iterator_functor<ContextT>::operator()()
 
     // loop over skip able whitespace until something significant is found
     bool was_seen_newline = seen_newline;
+    bool was_skipped_newline = skipped_newline;
     token_id id = T_UNKNOWN;
 
     try {   // catch lexer exceptions
         do {
+            if (skipped_newline) {
+                was_skipped_newline = true;
+                skipped_newline = false;
+            }
+
         // get_next_token assigns result to act_token member
-            if (skipped_newline)
-                seen_newline = true;
             get_next_token();
 
         // if comments shouldn't be preserved replace them with newlines
@@ -510,6 +516,9 @@ pp_iterator_functor<ContextT>::operator()()
                 act_token.set_value("\n");
             }
 
+            if (IS_CATEGORY(id, EOLTokenType))
+                seen_newline = true;
+
         } while (ctx.get_hooks().may_skip_whitespace(ctx.derived(), act_token, skipped_newline));
     }
     catch (boost::wave::cpplexer::lexing_exception const& e) {
@@ -517,6 +526,10 @@ pp_iterator_functor<ContextT>::operator()()
         ctx.get_hooks().throw_exception(ctx.derived(), e);
         return act_token;
     }
+
+// restore the accumulated skipped_newline state for next invocation
+    if (was_skipped_newline)
+        skipped_newline = true;
 
 // if there were skipped any newlines, we must emit a #line directive
     if ((must_emit_line_directive || (was_seen_newline && skipped_newline)) &&

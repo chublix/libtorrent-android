@@ -107,6 +107,7 @@ typedef addrinfo addrinfo_type;
 typedef unsigned long ioctl_arg_type;
 typedef u_long u_long_type;
 typedef u_short u_short_type;
+typedef int signed_size_type;
 const int shutdown_receive = SD_RECEIVE;
 const int shutdown_send = SD_SEND;
 const int shutdown_both = SD_BOTH;
@@ -123,7 +124,12 @@ const int max_iov_len = 16;
 typedef int socket_type;
 const int invalid_socket = -1;
 const int socket_error_retval = -1;
+// @Moss - Some platforms do not define it (Android)
+#if defined(INET_ADDRSTRLEN)
 const int max_addr_v4_str_len = INET_ADDRSTRLEN;
+#else // defined(INET_ADDRSTRLEN)
+const int max_addr_v4_str_len = 16;
+#endif // defined(INET_ADDRSTRLEN)
 #if defined(INET6_ADDRSTRLEN)
 const int max_addr_v6_str_len = INET6_ADDRSTRLEN + 1 + IF_NAMESIZE;
 #else // defined(INET6_ADDRSTRLEN)
@@ -151,6 +157,11 @@ typedef addrinfo addrinfo_type;
 typedef int ioctl_arg_type;
 typedef uint32_t u_long_type;
 typedef uint16_t u_short_type;
+#if defined(BOOST_ASIO_HAS_SSIZE_T)
+typedef ssize_t signed_size_type;
+#else // defined(BOOST_ASIO_HAS_SSIZE_T)
+typedef int signed_size_type;
+#endif // defined(BOOST_ASIO_HAS_SSIZE_T)
 const int shutdown_receive = SHUT_RD;
 const int shutdown_send = SHUT_WR;
 const int shutdown_both = SHUT_RDWR;

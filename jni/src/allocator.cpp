@@ -119,10 +119,9 @@ namespace libtorrent
 #endif
 
 #if TORRENT_USE_POSIX_MEMALIGN
-		//void* ret;
-		//if (posix_memalign(&ret, page_size(), bytes) != 0) ret = 0;
-		//return (char*)ret;
-		return (char*)memalign(page_size(), bytes);
+		void* ret;
+		if (posix_memalign(&ret, page_size(), bytes) != 0) ret = 0;
+		return (char*)ret;
 #elif TORRENT_USE_MEMALIGN
 		return (char*)memalign(page_size(), bytes);
 #elif defined TORRENT_WINDOWS

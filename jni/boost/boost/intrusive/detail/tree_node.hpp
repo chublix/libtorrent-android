@@ -1,6 +1,6 @@
 /////////////////////////////////////////////////////////////////////////////
 //
-// (C) Copyright Ion Gaztanaga  2007.
+// (C) Copyright Ion Gaztanaga  2007-2012
 //
 // Distributed under the Boost Software License, Version 1.0.
 //    (See accompanying file LICENSE_1_0.txt or copy at
@@ -41,19 +41,28 @@ struct tree_node_traits
    typedef typename pointer_traits<VoidPointer>::template
       rebind_pointer<const node>::type        const_node_ptr;
 
-   static const node_ptr & get_parent(const const_node_ptr & n)
+   static node_ptr get_parent(const const_node_ptr & n)
+   {  return n->parent_;  }
+
+   static node_ptr get_parent(const node_ptr & n)
    {  return n->parent_;  }
 
    static void set_parent(const node_ptr & n, const node_ptr & p)
    {  n->parent_ = p;  }
 
-   static const node_ptr & get_left(const const_node_ptr & n)
+   static node_ptr get_left(const const_node_ptr & n)
+   {  return n->left_;  }
+
+   static node_ptr get_left(const node_ptr & n)
    {  return n->left_;  }
 
    static void set_left(const node_ptr & n, const node_ptr & l)
    {  n->left_ = l;  }
 
-   static const node_ptr & get_right(const const_node_ptr & n)
+   static node_ptr get_right(const const_node_ptr & n)
+   {  return n->right_;  }
+
+   static node_ptr get_right(const node_ptr & n)
    {  return n->right_;  }
 
    static void set_right(const node_ptr & n, const node_ptr & r)
@@ -119,7 +128,7 @@ class tree_iterator
       members_.nodeptr_ = node_algorithms::next_node(members_.nodeptr_);
       return static_cast<tree_iterator&> (*this);
    }
-  
+
    tree_iterator operator++(int)
    {
       tree_iterator result (*this);
@@ -132,7 +141,7 @@ class tree_iterator
       members_.nodeptr_ = node_algorithms::prev_node(members_.nodeptr_);
       return static_cast<tree_iterator&> (*this);
    }
-  
+
    tree_iterator operator--(int)
    {
       tree_iterator result (*this);

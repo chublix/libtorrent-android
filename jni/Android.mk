@@ -1,33 +1,34 @@
 LOCAL_PATH:= $(call my-dir)
 
 include $(CLEAR_VARS)
+LOCAL_MODULE    := libboost_system-gcc-mt-1_53
+LOCAL_SRC_FILES := boost/android/lib/libboost_system-gcc-mt-1_53.a
+include $(PREBUILT_STATIC_LIBRARY)
 
-TARGET_ARCH_ABI := armeabi-v7a
+include $(CLEAR_VARS)
+LOCAL_MODULE    := libboost_filesystem-gcc-mt-1_53
+LOCAL_SRC_FILES := boost/android/lib/libboost_filesystem-gcc-mt-1_53.a
+include $(PREBUILT_STATIC_LIBRARY)
 
-LOCAL_MODULE := torrent
+include $(CLEAR_VARS)
+LOCAL_MODULE := libtorrent
 
 LOCAL_CFLAGS := -DBOOST_ASIO_HASH_MAP_BUCKETS=1021 \
 				-DBOOST_FILESYSTEM_VERSION=3 \
 				-DUNICODE \
 				-DWITH_SHIPPED_GEOIP_H \
-				-DTORRENT_BUILDING_SHARED \
+				-DTORRENT_BUILDING_STATIC \
 				-DBOOST_ASIO_SEPARATE_COMPILATION \
 				-DBOOST_ASIO_ENABLE_CANCELIO \
-				-DTORRENT_USE_TOMMATH \
 				-DTORRENT_USE_ICONV=0 \
-				-DTORRENT_USE_LOCALE=1 \
-				-DOPENSSL_NO_ENGINE
+				-DTORRENT_USE_TOMMATH 
 
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/include \
-					$(LOCAL_PATH)/boost \
-					$(LOCAL_PATH)/openssl/include \
-					$(LOCAL_PATH)/tools/include \
-					$(LOCAL_PATH)/libiconv/include
+					$(LOCAL_PATH)/boost 
 
 LOCAL_SRC_FILES := 	src/alert.cpp \
 					src/allocator.cpp \
 					src/asio.cpp \
-					src/asio_ssl.cpp \
 					src/assert.cpp \
 					src/bandwidth_limit.cpp \
 					src/bandwidth_manager.cpp \
@@ -37,8 +38,8 @@ LOCAL_SRC_FILES := 	src/alert.cpp \
 					src/bt_peer_connection.cpp \
 					src/chained_buffer.cpp \
 					src/connection_queue.cpp \
-					src/ConvertUTF.cpp \
 					src/create_torrent.cpp \
+					src/ConvertUTF.cpp \
 					src/disk_buffer_holder.cpp \
 					src/disk_buffer_pool.cpp \
 					src/disk_io_thread.cpp \
@@ -49,8 +50,8 @@ LOCAL_SRC_FILES := 	src/alert.cpp \
 					src/file.cpp \
 					src/file_pool.cpp \
 					src/file_storage.cpp \
-					src/GeoIP.c \
 					src/gzip.cpp \
+					src/GeoIP.c \
 					src/http_connection.cpp \
 					src/http_parser.cpp \
 					src/http_seed_connection.cpp \
@@ -70,8 +71,8 @@ LOCAL_SRC_FILES := 	src/alert.cpp \
 					src/natpmp.cpp \
 					src/packet_buffer.cpp \
 					src/parse_url.cpp \
-					src/peer_connection.cpp \
 					src/pe_crypto.cpp \
+					src/peer_connection.cpp \
 					src/piece_picker.cpp \
 					src/policy.cpp \
 					src/puff.cpp \
@@ -99,30 +100,24 @@ LOCAL_SRC_FILES := 	src/alert.cpp \
 					src/udp_socket.cpp \
 					src/udp_tracker_connection.cpp \
 					src/upnp.cpp \
+					src/ut_metadata.cpp \
+					src/ut_pex.cpp \
 					src/utf8.cpp \
 					src/utp_socket_manager.cpp \
 					src/utp_stream.cpp \
-					src/ut_metadata.cpp \
-					src/ut_pex.cpp \
 					src/web_connection_base.cpp \
 					src/web_peer_connection.cpp \
 					src/kademlia/dht_tracker.cpp \
-					src/kademlia/find_data.cpp \
 					src/kademlia/node.cpp \
-					src/kademlia/node_id.cpp \
 					src/kademlia/refresh.cpp \
-					src/kademlia/routing_table.cpp \
 					src/kademlia/rpc_manager.cpp \
-					src/kademlia/traversal_algorithm.cpp \
-					tools/src/ifaddrs.c
-				 
-LOCAL_LDLIBS := -L$(LOCAL_PATH)/openssl/lib -L$(LOCAL_PATH)/boost/android/lib -lssl -lcrypto -lboost_system -lboost_filesystem
+					src/kademlia/find_data.cpp \
+					src/kademlia/node_id.cpp \
+					src/kademlia/routing_table.cpp \
+					src/kademlia/traversal_algorithm.cpp
+					
+LOCAL_STATIC_LIBRARIES := libboost_system-gcc-mt-1_53 \
+						  libboost_filesystem-gcc-mt-1_53 
 
-LOCAL_STATIC_LIBRARIES := libboost_system \
-						  libboost_filesystem 
-						   
-						  
-LOCAL_SHARED_LIBRARIES := libssl \
-						  libcrypto
-
-include $(BUILD_SHARED_LIBRARY)
+include $(BUILD_STATIC_LIBRARY)
+#include $(BUILD_SHARED_LIBRARY)

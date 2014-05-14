@@ -1,6 +1,6 @@
 //////////////////////////////////////////////////////////////////////////////
 //
-// (C) Copyright Ion Gaztanaga 2009-2011. Distributed under the Boost
+// (C) Copyright Ion Gaztanaga 2009-2012. Distributed under the Boost
 // Software License, Version 1.0. (See accompanying file
 // LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
@@ -54,7 +54,7 @@ static void create_tmp_subdir_and_get_pid_based_filepath
    s += "/";
    s += file_prefix;
    if(creation_time){
-      std::string sstamp;  
+      std::string sstamp;
       get_pid_creation_time_str(sstamp);
       s += sstamp;
    }
@@ -104,7 +104,7 @@ static bool check_if_filename_complies_with_pid
 }
 
 template<>
-struct managed_sh_dependant<managed_global_memory>
+struct thread_safe_global_map_dependant<managed_global_memory>
 {
    private:
    static const int GMemMarkToBeRemoved = -1;
@@ -137,7 +137,7 @@ struct managed_sh_dependant<managed_global_memory>
          delete_file(singleton_lock_file_path_);
          shared_memory_object::remove(shm_name_);
       }
-     
+
       const char * const shm_name_;
       const char * const singleton_lock_file_path_;
       managed_global_memory & shm_;
@@ -161,7 +161,7 @@ struct managed_sh_dependant<managed_global_memory>
          }
          //If done, then the process is dead so take global shared memory name
          //(the name is based on the lock file name) and try to apply erasure logic
-         str.insert(0, get_shm_base_name());
+         str.insert(0, get_map_base_name());
          try{
             managed_global_memory shm(open_only, str.c_str());
             gmem_erase_func func(str.c_str(), filepath, shm);
@@ -201,7 +201,7 @@ struct managed_sh_dependant<managed_global_memory>
 
       void operator()(void)
       {
-         retry_with_new_shm = false;
+         retry_with_new_map = false;
 
          //First find the file locking descriptor id
          locking_file_serial_id *pserial_id =
@@ -222,27 +222,27 @@ struct managed_sh_dependant<managed_global_memory>
             //Create a unique current pid based lock file path
             create_and_get_singleton_lock_file_path(lck_str);
             //Open or create and lock file
-            int fd = open_or_create_and_lock_file(lck_str.c_str());
+            int fd_lockfile = open_or_create_and_lock_file(lck_str.c_str());
             //If failed, write a bad file descriptor to notify other modules that
             //something was wrong and unlink shared memory. Mark the function object
             //to tell caller to retry with another shared memory
-            if(fd < 0){
+            if(fd_lockfile < 0){
                this->register_lock_file(GMemMarkToBeRemoved);
                std::string s;
-               get_shm_name(s);
+               get_map_name(s);
                shared_memory_object::remove(s.c_str());
-               retry_with_new_shm = true;
+               retry_with_new_map = true;
             }
             //If successful, register the file descriptor
             else{
-               this->register_lock_file(fd);
+               this->register_lock_file(fd_lockfile);
             }
          }
          //If the fd was invalid (maybe a previous try failed) notify caller that
          //should retry creation logic, since this shm might have been already
          //unlinked since the shm was removed
          else if (fd == GMemMarkToBeRemoved){
-            retry_with_new_shm = true;
+            retry_with_new_map = true;
          }
          //If the stored fd is not valid (a open fd, a normal file with the
          //expected size, or does not have the same file id number,
@@ -254,9 +254,9 @@ struct managed_sh_dependant<managed_global_memory>
                !compare_file_serial(fd, *pserial_id)){
             pserial_id->fd = GMemMarkToBeRemoved;
             std::string s;
-            get_shm_name(s);
+            get_map_name(s);
             shared_memory_object::remove(s.c_str());
-            retry_with_new_shm = true;
+            retry_with_new_map = true;
          }
          else{
             //If the lock file is ok, increment reference count of
@@ -264,6 +264,8 @@ struct managed_sh_dependant<managed_global_memory>
             atomic_inc32(&pserial_id->modules_attached_to_gmem_count);
          }
       }
+
+      bool retry() const { return retry_with_new_map; }
 
       private:
       locking_file_serial_id * register_lock_file(int fd)
@@ -273,16 +275,25 @@ struct managed_sh_dependant<managed_global_memory>
          return pinfo;
       }
 
-      public:
       managed_global_memory &mshm;
-      bool retry_with_new_shm;
+      bool retry_with_new_map;
    };
 
-   struct unlink_shmlogic
+   static void construct_map(void *addr)
    {
-      unlink_shmlogic(managed_global_memory &mshm)
+      std::string s;
+      intermodule_singleton_helpers::get_map_name(s);
+      const char *MapName = s.c_str();
+      const std::size_t MapSize = intermodule_singleton_helpers::get_map_size();;
+      ::new (addr)managed_global_memory(open_or_create, MapName, MapSize);
+   }
+
+   struct unlink_map_logic
+   {
+      unlink_map_logic(managed_global_memory &mshm)
          : mshm_(mshm)
       {  mshm.atomic_func(*this);  }
+
       void operator()()
       {
          locking_file_serial_id *pserial_id =
@@ -297,13 +308,36 @@ struct managed_sh_dependant<managed_global_memory>
                create_and_get_singleton_lock_file_path(s);
                delete_file(s.c_str());
                close_lock_file(fd);
-               intermodule_singleton_helpers::get_shm_name(s);
+               intermodule_singleton_helpers::get_map_name(s);
                shared_memory_object::remove(s.c_str());
             }
          }
       }
+
+      private:
       managed_global_memory &mshm_;
    };
+
+   static ref_count_ptr *find(managed_global_memory &map, const char *name)
+   {
+      return map.find<ref_count_ptr>(name).first;
+   }
+
+   static ref_count_ptr *insert(managed_global_memory &map, const char *name, const ref_count_ptr &ref)
+   {
+      return map.construct<ref_count_ptr>(name)(ref);
+   }
+
+   static bool erase(managed_global_memory &map, const char *name)
+   {
+      return map.destroy<ref_count_ptr>(name);
+   }
+
+   template<class F>
+   static void atomic_func(managed_global_memory &map, F &f)
+   {
+      map.atomic_func(f);
+   }
 };
 
 }  //namespace intermodule_singleton_helpers {

@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////
 //
 // (C) Copyright Olaf Krzikalla 2004-2006.
-// (C) Copyright Ion Gaztanaga  2006-2009
+// (C) Copyright Ion Gaztanaga  2006-2012
 //
 // Distributed under the Boost Software License, Version 1.0.
 //    (See accompanying file LICENSE_1_0.txt or copy at
@@ -44,13 +44,19 @@ struct list_node_traits
    typedef typename pointer_traits
       <VoidPointer>:: template rebind_pointer<const node>::type   const_node_ptr;
 
-   static const node_ptr &get_previous(const const_node_ptr & n)
+   static node_ptr get_previous(const const_node_ptr & n)
+   {  return n->prev_;  }
+
+   static node_ptr get_previous(const node_ptr & n)
    {  return n->prev_;  }
 
    static void set_previous(const node_ptr & n, const node_ptr & prev)
    {  n->prev_ = prev;  }
 
-   static const node_ptr &get_next(const const_node_ptr & n)
+   static node_ptr get_next(const const_node_ptr & n)
+   {  return n->next_;  }
+
+   static node_ptr get_next(const node_ptr & n)
    {  return n->next_;  }
 
    static void set_next(const node_ptr & n, const node_ptr & next)
@@ -110,7 +116,7 @@ class list_iterator
       //members_.nodeptr_ = node_traits::get_next(members_.nodeptr_);
       return static_cast<list_iterator&> (*this);
    }
-  
+
    list_iterator operator++(int)
    {
       list_iterator result (*this);
@@ -123,7 +129,7 @@ class list_iterator
       members_.nodeptr_ = node_traits::get_previous(members_.nodeptr_);
       return static_cast<list_iterator&> (*this);
    }
-  
+
    list_iterator operator--(int)
    {
       list_iterator result (*this);

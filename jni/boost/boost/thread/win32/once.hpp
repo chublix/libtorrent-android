@@ -18,6 +18,7 @@
 #include <boost/detail/interlocked.hpp>
 #include <boost/thread/win32/thread_primitives.hpp>
 #include <boost/thread/win32/interlocked_read.hpp>
+#include <boost/detail/no_exceptions_support.hpp>
 
 #include <boost/config/abi_prefix.hpp>
 
@@ -157,7 +158,7 @@ namespace boost
             status=BOOST_INTERLOCKED_COMPARE_EXCHANGE(&flag.status,running_value,0);
             if(!status)
             {
-                try
+                BOOST_TRY
                 {
                     if(!event_handle)
                     {
@@ -185,7 +186,7 @@ namespace boost
                     }
                     break;
                 }
-                catch(...)
+                BOOST_CATCH(...)
                 {
                     BOOST_INTERLOCKED_EXCHANGE(&flag.status,0);
                     if(!event_handle)
@@ -196,8 +197,9 @@ namespace boost
                     {
                         ::boost::detail::win32::SetEvent(event_handle);
                     }
-                    throw;
+                    BOOST_RETHROW
                 }
+                BOOST_CATCH_END
             }
 
             if(!counted)
