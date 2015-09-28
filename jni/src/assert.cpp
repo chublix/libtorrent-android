@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2007, Arvid Norberg
+Copyright (c) 2007-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -32,7 +32,12 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/config.hpp"
 
-#if defined TORRENT_DEBUG || defined TORRENT_ASIO_DEBUGGING || TORRENT_RELEASE_ASSERTS
+#if TORRENT_PRODUCTION_ASSERTS
+#include <boost/detail/atomic_count.hpp>
+#endif
+
+#if defined TORRENT_DEBUG || defined TORRENT_ASIO_DEBUGGING \
+	|| TORRENT_RELEASE_ASSERTS || defined TORRENT_DEBUG_BUFFERS
 
 #ifdef __APPLE__
 #include <AvailabilityMacros.h>
@@ -113,7 +118,7 @@ std::string demangle(char const* name) { return name; }
 #if TORRENT_USE_EXECINFO
 #include <execinfo.h>
 
-void print_backtrace(char* out, int len, int max_depth)
+TORRENT_EXPORT void print_backtrace(char* out, int len, int max_depth)
 {
 	void* stack[50];
 	int size = backtrace(stack, 50);
@@ -142,7 +147,7 @@ void print_backtrace(char* out, int len, int max_depth)
 #include "winbase.h"
 #include "dbghelp.h"
 
-void print_backtrace(char* out, int len, int max_depth)
+TORRENT_EXPORT void print_backtrace(char* out, int len, int max_depth)
 {
 	typedef USHORT (WINAPI *RtlCaptureStackBackTrace_t)(
 		__in ULONG FramesToSkip,
@@ -196,18 +201,27 @@ void print_backtrace(char* out, int len, int max_depth)
 
 #else
 
-void print_backtrace(char* out, int len, int max_depth) {}
+TORRENT_EXPORT void print_backtrace(char* out, int len, int max_depth) {}
 
 #endif
+
+#endif
+
+#if TORRENT_USE_ASSERTS || defined TORRENT_ASIO_DEBUGGING
 
 #if TORRENT_PRODUCTION_ASSERTS
 char const* libtorrent_assert_log = "asserts.log";
+// the number of asserts we've printed to the log
+boost::detail::atomic_count assert_counter(0);
 #endif
 
 TORRENT_EXPORT void assert_fail(char const* expr, int line, char const* file
-	, char const* function, char const* value)
+	, char const* function, char const* value, int kind)
 {
 #if TORRENT_PRODUCTION_ASSERTS
+	// no need to flood the assert log with infinite number of asserts
+	if (++assert_counter > 500) return;
+
 	FILE* out = fopen(libtorrent_assert_log, "a+");
 	if (out == 0) out = stderr;
 #else
@@ -215,13 +229,23 @@ TORRENT_EXPORT void assert_fail(char const* expr, int line, char const* file
 #endif
 
 	char stack[8192];
+	stack[0] = '\0';
 	print_backtrace(stack, sizeof(stack), 0);
 
-	fprintf(out, "assertion failed. Please file a bugreport at "
-		"http://code.google.com/p/libtorrent/issues\n"
+	char const* message = "assertion failed. Please file a bugreport at "
+		"https://github.com/arvidn/libtorrent/issues\n"
 		"Please include the following information:\n\n"
 		"version: " LIBTORRENT_VERSION "\n"
-		"%s\n"
+		LIBTORRENT_REVISION "\n";
+
+	switch (kind)
+	{
+		case 1:
+			message = "A precondition of a libtorrent function has been violated.\n"
+				"This indicates a bug in the client application using libtorrent\n";
+	}
+
+	fprintf(out, "%s\n"
 		"file: '%s'\n"
 		"line: %d\n"
 		"function: %s\n"
@@ -229,7 +253,7 @@ TORRENT_EXPORT void assert_fail(char const* expr, int line, char const* file
 		"%s%s\n"
 		"stack:\n"
 		"%s\n"
-		, LIBTORRENT_REVISION, file, line, function, expr
+		, message, file, line, function, expr
 		, value ? value : "", value ? "\n" : ""
 		, stack);
 
@@ -237,16 +261,17 @@ TORRENT_EXPORT void assert_fail(char const* expr, int line, char const* file
 #if TORRENT_PRODUCTION_ASSERTS
 	if (out != stderr) fclose(out);
 #else
- 	// send SIGINT to the current process
- 	// to break into the debugger
- 	raise(SIGINT);
- 	abort();
+	// send SIGINT to the current process
+	// to break into the debugger
+	raise(SIGINT);
+	abort();
 #endif
 }
 
 #else
 
-TORRENT_EXPORT void assert_fail(char const* expr, int line, char const* file, char const* function) {}
+TORRENT_EXPORT void assert_fail(char const* expr, int line, char const* file
+	, char const* function, char const* value, int kind) {}
 
 #endif
 

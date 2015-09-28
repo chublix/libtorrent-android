@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2006, Arvid Norberg
+Copyright (c) 2006-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -71,13 +71,14 @@ namespace libtorrent { namespace dht
 	TORRENT_EXTRA_EXPORT void intrusive_ptr_add_ref(dht_tracker const*);
 	TORRENT_EXTRA_EXPORT void intrusive_ptr_release(dht_tracker const*);	
 
-	struct dht_tracker
+	struct dht_tracker : udp_socket_interface, udp_socket_observer
 	{
 		friend void intrusive_ptr_add_ref(dht_tracker const*);
 		friend void intrusive_ptr_release(dht_tracker const*);
-		friend bool send_callback(void* userdata, entry& e, udp::endpoint const& addr, int flags);
+
 		dht_tracker(libtorrent::aux::session_impl& ses, rate_limited_udp_socket& sock
 			, dht_settings const& settings, entry const* state = 0);
+		virtual ~dht_tracker();
 
 		void start(entry const& bootstrap
 			, find_data::nodes_callback const& f);
@@ -89,16 +90,32 @@ namespace libtorrent { namespace dht
 
 		entry state() const;
 
-		void announce(sha1_hash const& ih, int listen_port, bool seed
+		enum flags_t { flag_seed = 1, flag_implied_port = 2 };
+		void announce(sha1_hash const& ih, int listen_port, int flags
 			, boost::function<void(std::vector<tcp::endpoint> const&)> f);
+
+		void get_item(sha1_hash const& target
+			, boost::function<void(item const&)> cb);
+
+		// key is a 32-byte binary string, the public key to look up.
+		// the salt is optional
+		void get_item(char const* key
+			, boost::function<void(item const&)> cb
+			, std::string salt = std::string());
+
+		void put_item(entry data
+			, boost::function<void()> cb);
+
+		void put_item(char const* key
+			, boost::function<void(item&)> cb, std::string salt = std::string());
 
 		void dht_status(session_status& s);
 		void network_stats(int& sent, int& received);
 
 		// translate bittorrent kademlia message into the generic kademlia message
 		// used by the library
-		void on_receive(udp::endpoint const& ep, char const* pkt, int size);
-		void on_unreachable(udp::endpoint const& ep);
+		virtual bool incoming_packet(error_code const& ec
+			, udp::endpoint const&, char const* buf, int size);
 
 	private:
 	
@@ -113,10 +130,11 @@ namespace libtorrent { namespace dht
 		void refresh_timeout(error_code const& e);
 		void tick(error_code const& e);
 
-		bool send_packet(libtorrent::entry& e, udp::endpoint const& addr, int send_flags);
+		// implements udp_socket_interface
+		virtual bool send_packet(libtorrent::entry& e, udp::endpoint const& addr
+			, int send_flags);
 
 		node_impl m_dht;
-		libtorrent::aux::session_impl& m_ses;
 		rate_limited_udp_socket& m_sock;
 
 		std::vector<char> m_send_buf;

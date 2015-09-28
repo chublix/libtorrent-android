@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2003, Arvid Norberg
+Copyright (c) 2003-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,11 +30,8 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#include "libtorrent/pch.hpp"
-
 #include <algorithm>
-#if (defined TORRENT_VERBOSE_LOGGING || defined TORRENT_DEBUG) && TORRENT_USE_IOSTREAM
-#include <iomanip>
+#if TORRENT_USE_IOSTREAM
 #include <iostream>
 #endif
 #include <boost/bind.hpp>
@@ -42,6 +39,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/config.hpp"
 #include "libtorrent/escape_string.hpp"
 #include "libtorrent/lazy_entry.hpp"
+#include "libtorrent/escape_string.hpp"
 
 #if defined(_MSC_VER)
 #define for if (false) {} else for
@@ -112,7 +110,7 @@ namespace libtorrent
 		if (i == dict().end()) return 0;
 		return &i->second;
 	}
-	
+
 	entry* entry::find_key(std::string const& key)
 	{
 		dictionary_type::iterator i = dict().find(key);
@@ -126,7 +124,7 @@ namespace libtorrent
 		if (i == dict().end()) return 0;
 		return &i->second;
 	}
-	
+
 #ifndef BOOST_NO_EXCEPTIONS
 	const entry& entry::operator[](char const* key) const
 	{
@@ -147,7 +145,7 @@ namespace libtorrent
 #ifdef TORRENT_DEBUG
 		m_type_queried = true;
 #endif
-		return m_type;
+		return (entry::data_type)m_type;
 	}
 
 	entry::~entry() { destruct(); }
@@ -547,15 +545,22 @@ namespace libtorrent
 		}
 	}
 
-#if (defined TORRENT_VERBOSE_LOGGING || defined TORRENT_DEBUG) && TORRENT_USE_IOSTREAM
-	void entry::print(std::ostream& os, int indent) const
+	std::string entry::to_string() const
+	{
+		std::string ret;
+		to_string_impl(ret, 0);
+		return ret;
+	}
+
+	void entry::to_string_impl(std::string& out, int indent) const
 	{
 		TORRENT_ASSERT(indent >= 0);
-		for (int i = 0; i < indent; ++i) os << " ";
+		for (int i = 0; i < indent; ++i) out += " ";
 		switch (m_type)
 		{
 		case int_t:
-			os << integer() << "\n";
+			out += libtorrent::to_string(integer()).elems;
+		  	out += "\n";
 			break;
 		case string_t:
 			{
@@ -568,20 +573,28 @@ namespace libtorrent
 						break;
 					}
 				}
-				if (binary_string) os << to_hex(string()) << "\n";
-				else os << string() << "\n";
+				if (binary_string)
+				{
+					out += to_hex(string());
+					out += "\n";
+				}
+				else
+				{
+					out += string();
+					out += "\n";
+				}
 			} break;
 		case list_t:
 			{
-				os << "list\n";
+				out += "list\n";
 				for (list_type::const_iterator i = list().begin(); i != list().end(); ++i)
 				{
-					i->print(os, indent+1);
+					i->to_string_impl(out, indent+1);
 				}
 			} break;
 		case dictionary_t:
 			{
-				os << "dictionary\n";
+				out += "dictionary\n";
 				for (dictionary_type::const_iterator i = dict().begin(); i != dict().end(); ++i)
 				{
 					bool binary_string = false;
@@ -593,23 +606,22 @@ namespace libtorrent
 							break;
 						}
 					}
-					for (int j = 0; j < indent+1; ++j) os << " ";
-					os << "[";
-					if (binary_string) os << to_hex(i->first);
-					else os << i->first;
-					os << "]";
+					for (int j = 0; j < indent+1; ++j) out += " ";
+					out += "[";
+					if (binary_string) out += to_hex(i->first);
+					else out += i->first;
+					out += "]";
 
 					if (i->second.type() != entry::string_t
 						&& i->second.type() != entry::int_t)
-						os << "\n";
-					else os << " ";
-					i->second.print(os, indent+2);
+						out += "\n";
+					else out += " ";
+					i->second.to_string_impl(out, indent+2);
 				}
 			} break;
 		default:
-			os << "<uninitialized>\n";
+			out += "<uninitialized>\n";
 		}
 	}
-#endif
 }
 

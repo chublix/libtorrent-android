@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2007, Arvid Norberg
+Copyright (c) 2007-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -86,6 +86,10 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #if TORRENT_USE_IFADDRS
 #include <ifaddrs.h>
+#endif
+
+#if defined(TORRENT_OS2) && !defined(IF_NAMESIZE)
+#define IF_NAMESIZE IFNAMSIZ
 #endif
 
 namespace libtorrent { namespace
@@ -222,6 +226,9 @@ namespace libtorrent { namespace
 #endif
 
 #if TORRENT_USE_SYSCTL
+#ifdef TORRENT_OS2
+int _System __libsocket_sysctl(int* mib, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
+#endif
 
 	bool parse_route(int s, rt_msghdr* rtm, ip_route* rt_info)
 	{
@@ -497,7 +504,11 @@ namespace libtorrent
 					close(s);
 					return ret;
 				}
+#ifndef TORRENT_OS2
 				iface.mtu = req.ifr_mtu;
+#else
+				iface.mtu = req.ifr_metric; // according to tcp/ip reference
+#endif
 
 				memset(&req, 0, sizeof(req));
 				strncpy(req.ifr_name, item.ifr_name, IF_NAMESIZE - 1);
@@ -626,7 +637,13 @@ namespace libtorrent
 		}
 
 #else
-#warning THIS OS IS NOT RECOGNIZED, enum_net_interfaces WILL PROBABLY NOT WORK
+
+#ifdef _MSC_VER
+#pragma message ( "THIS OS IS NOT RECOGNIZED, enum_net_interfaces WILL PROBABLY NOT WORK" )
+#else
+#warning "THIS OS IS NOT RECOGNIZED, enum_net_interfaces WILL PROBABLY NOT WORK"
+#endif
+
 		// make a best guess of the interface we're using and its IP
 		udp::resolver r(ios);
 		udp::resolver::iterator i = r.resolve(udp::resolver::query(asio::ip::host_name(ec), "0"), ec);
@@ -766,7 +783,11 @@ namespace libtorrent
 	int mib[6] = { CTL_NET, PF_ROUTE, 0, AF_UNSPEC, NET_RT_DUMP, 0};
 
 	size_t needed = 0;
+#ifdef TORRENT_OS2
+	if (__libsocket_sysctl(mib, 6, 0, &needed, 0, 0) < 0)
+#else
 	if (sysctl(mib, 6, 0, &needed, 0, 0) < 0)
+#endif
 	{
 		ec = error_code(errno, asio::error::system_category);
 		return std::vector<ip_route>();
@@ -784,7 +805,11 @@ namespace libtorrent
 		return std::vector<ip_route>();
 	}
 
+#ifdef TORRENT_OS2
+	if (__libsocket_sysctl(mib, 6, buf.get(), &needed, 0, 0) < 0)
+#else
 	if (sysctl(mib, 6, buf.get(), &needed, 0, 0) < 0)
+#endif
 	{
 		ec = error_code(errno, asio::error::system_category);
 		return std::vector<ip_route>();

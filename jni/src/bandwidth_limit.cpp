@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2009, Arvid Norberg
+Copyright (c) 2009-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -47,7 +47,7 @@ namespace libtorrent
 	{
 		TORRENT_ASSERT(limit >= 0);
 		// if the throttle is more than this, we might overflow
-		TORRENT_ASSERT(limit < INT_MAX / 31);
+		TORRENT_ASSERT(limit < INT_MAX);
 		m_limit = limit;
 	}
 	

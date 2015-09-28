@@ -2,16 +2,16 @@ LOCAL_PATH:= $(call my-dir)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE    := libboost_system-gcc-mt-1_53
-LOCAL_SRC_FILES := boost/android/lib/libboost_system-gcc-mt-1_53.a
+LOCAL_SRC_FILES := lib/libboost_system-gcc-mt-1_53.a
 include $(PREBUILT_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE    := libboost_filesystem-gcc-mt-1_53
-LOCAL_SRC_FILES := boost/android/lib/libboost_filesystem-gcc-mt-1_53.a
+LOCAL_SRC_FILES := lib/libboost_filesystem-gcc-mt-1_53.a
 include $(PREBUILT_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
-LOCAL_MODULE := libtorrent
+LOCAL_MODULE := libtorrent-rasterbar
 
 LOCAL_CFLAGS := -DBOOST_ASIO_HASH_MAP_BUCKETS=1021 \
 				-DBOOST_FILESYSTEM_VERSION=3 \
@@ -23,10 +23,12 @@ LOCAL_CFLAGS := -DBOOST_ASIO_HASH_MAP_BUCKETS=1021 \
 				-DTORRENT_USE_ICONV=0 \
 				-DTORRENT_USE_TOMMATH 
 
-LOCAL_C_INCLUDES := $(LOCAL_PATH)/include \
-					$(LOCAL_PATH)/boost 
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/include  
 
-LOCAL_SRC_FILES := 	src/alert.cpp \
+LOCAL_SRC_FILES := 	src/ConvertUTF.cpp \
+					src/GeoIP.c \
+					src/alert.cpp \
+					src/alert_manager.cpp \
 					src/allocator.cpp \
 					src/asio.cpp \
 					src/assert.cpp \
@@ -39,7 +41,6 @@ LOCAL_SRC_FILES := 	src/alert.cpp \
 					src/chained_buffer.cpp \
 					src/connection_queue.cpp \
 					src/create_torrent.cpp \
-					src/ConvertUTF.cpp \
 					src/disk_buffer_holder.cpp \
 					src/disk_buffer_pool.cpp \
 					src/disk_io_thread.cpp \
@@ -51,7 +52,7 @@ LOCAL_SRC_FILES := 	src/alert.cpp \
 					src/file_pool.cpp \
 					src/file_storage.cpp \
 					src/gzip.cpp \
-					src/GeoIP.c \
+					src/hasher.cpp \
 					src/http_connection.cpp \
 					src/http_parser.cpp \
 					src/http_seed_connection.cpp \
@@ -61,6 +62,7 @@ LOCAL_SRC_FILES := 	src/alert.cpp \
 					src/identify_client.cpp \
 					src/instantiate_connection.cpp \
 					src/ip_filter.cpp \
+					src/ip_voter.cpp \
 					src/lazy_bdecode.cpp \
 					src/logger.cpp \
 					src/lsd.cpp \
@@ -77,7 +79,6 @@ LOCAL_SRC_FILES := 	src/alert.cpp \
 					src/policy.cpp \
 					src/puff.cpp \
 					src/random.cpp \
-					src/rsa.cpp \
 					src/rss.cpp \
 					src/session.cpp \
 					src/session_impl.cpp \
@@ -107,17 +108,21 @@ LOCAL_SRC_FILES := 	src/alert.cpp \
 					src/utp_stream.cpp \
 					src/web_connection_base.cpp \
 					src/web_peer_connection.cpp \
+					src/xml_parse.cpp \
 					src/kademlia/dht_tracker.cpp \
-					src/kademlia/node.cpp \
-					src/kademlia/refresh.cpp \
-					src/kademlia/rpc_manager.cpp \
 					src/kademlia/find_data.cpp \
+					src/kademlia/get_item.cpp \
+					src/kademlia/get_peers.cpp \
+					src/kademlia/item.cpp \
+					src/kademlia/logging.cpp \
+					src/kademlia/node.cpp \
 					src/kademlia/node_id.cpp \
+					src/kademlia/refresh.cpp \
 					src/kademlia/routing_table.cpp \
-					src/kademlia/traversal_algorithm.cpp
+					src/kademlia/rpc_manager.cpp \
+					src/kademlia/traversal_algorithm.cpp 
 					
 LOCAL_STATIC_LIBRARIES := libboost_system-gcc-mt-1_53 \
 						  libboost_filesystem-gcc-mt-1_53 
 
 include $(BUILD_STATIC_LIBRARY)
-#include $(BUILD_SHARED_LIBRARY)

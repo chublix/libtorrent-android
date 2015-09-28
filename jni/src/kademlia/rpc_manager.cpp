@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2006, Arvid Norberg
+Copyright (c) 2006-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,15 +30,12 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#include "libtorrent/pch.hpp"
 #include "libtorrent/socket.hpp"
-
-// TODO: it would be nice to not have this dependency here
-#include "libtorrent/aux_/session_impl.hpp"
 
 #include <boost/bind.hpp>
 
 #include <libtorrent/io.hpp>
+#include <libtorrent/random.hpp>
 #include <libtorrent/invariant_check.hpp>
 #include <libtorrent/kademlia/node_id.hpp> // for generate_random_id
 #include <libtorrent/kademlia/rpc_manager.hpp>
@@ -49,6 +46,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/kademlia/node.hpp>
 #include <libtorrent/kademlia/observer.hpp>
 #include <libtorrent/hasher.hpp>
+#include <libtorrent/session_settings.hpp> // for dht_settings
 #include <libtorrent/time.hpp>
 #include <time.h> // time()
 
@@ -152,6 +150,13 @@ void observer::timeout()
 	m_algorithm->failed(observer_ptr(this));
 }
 
+void observer::set_id(node_id const& id)
+{
+	if (m_id == id) return;
+	m_id = id;
+	if (m_algorithm) m_algorithm->resort_results();
+}
+
 enum { observer_size = max3<
 	sizeof(find_data_observer)
 	, sizeof(announce_observer)
@@ -160,19 +165,16 @@ enum { observer_size = max3<
 };
 
 rpc_manager::rpc_manager(node_id const& our_id
-	, routing_table& table, send_fun const& sf
-	, void* userdata)
+	, routing_table& table, udp_socket_interface* sock)
 	: m_pool_allocator(observer_size, 10)
-	, m_send(sf)
-	, m_userdata(userdata)
-	, m_our_id(our_id)
+	, m_sock(sock)
 	, m_table(table)
 	, m_timer(time_now())
-	, m_random_number(generate_random_id())
+	, m_our_id(our_id)
 	, m_allocated_observers(0)
 	, m_destructing(false)
 {
-	std::srand(time(0));
+	std::srand((unsigned int)time(0));
 
 #ifdef TORRENT_DHT_VERBOSE_LOGGING
 	TORRENT_LOG(rpc) << "Constructing";
@@ -180,14 +182,14 @@ rpc_manager::rpc_manager(node_id const& our_id
 #define PRINT_OFFSETOF(x, y) TORRENT_LOG(rpc) << "  +" << offsetof(x, y) << ": " #y
 
 	TORRENT_LOG(rpc) << " observer: " << sizeof(observer);
-	PRINT_OFFSETOF(observer, m_sent);
-	PRINT_OFFSETOF(observer, m_refs);
-	PRINT_OFFSETOF(observer, m_algorithm);
-	PRINT_OFFSETOF(observer, m_id);
-	PRINT_OFFSETOF(observer, m_addr);
-	PRINT_OFFSETOF(observer, m_port);
-	PRINT_OFFSETOF(observer, m_transaction_id);
-	PRINT_OFFSETOF(observer, flags);
+	PRINT_OFFSETOF(dht::observer, m_sent);
+	PRINT_OFFSETOF(dht::observer, m_refs);
+	PRINT_OFFSETOF(dht::observer, m_algorithm);
+	PRINT_OFFSETOF(dht::observer, m_id);
+	PRINT_OFFSETOF(dht::observer, m_addr);
+	PRINT_OFFSETOF(dht::observer, m_port);
+	PRINT_OFFSETOF(dht::observer, m_transaction_id);
+	PRINT_OFFSETOF(dht::observer, flags);
 
 	TORRENT_LOG(rpc) << " announce_observer: " << sizeof(announce_observer);
 	TORRENT_LOG(rpc) << " null_observer: " << sizeof(null_observer);
@@ -225,16 +227,17 @@ void rpc_manager::free_observer(void* ptr)
 {
 	if (!ptr) return;
 	--m_allocated_observers;
+	TORRENT_ASSERT(reinterpret_cast<observer*>(ptr)->m_in_use == false);
 	m_pool_allocator.free(ptr);
 }
 
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 size_t rpc_manager::allocation_size() const
 {
 	return observer_size;
 }
 #endif
-#ifdef TORRENT_DEBUG
+#if TORRENT_USE_INVARIANT_CHECKS
 void rpc_manager::check_invariant() const
 {
 	for (transactions_t::const_iterator i = m_transactions.begin()
@@ -258,7 +261,7 @@ void rpc_manager::unreachable(udp::endpoint const& ep)
 		observer_ptr const& o = *i;
 		if (o->target_ep() != ep) { ++i; continue; }
 		observer_ptr ptr = *i;
-		m_transactions.erase(i++);
+		i = m_transactions.erase(i);
 #ifdef TORRENT_DHT_VERBOSE_LOGGING
 		TORRENT_LOG(rpc) << "  found transaction [ tid: " << ptr->transaction_id() << " ]";
 #endif
@@ -268,21 +271,23 @@ void rpc_manager::unreachable(udp::endpoint const& ep)
 }
 
 // defined in node.cpp
-void incoming_error(entry& e, char const* msg);
+void incoming_error(entry& e, char const* msg, int error_code = 203);
 
-bool rpc_manager::incoming(msg const& m, node_id* id)
+bool rpc_manager::incoming(msg const& m, node_id* id, libtorrent::dht_settings const& settings)
 {
 	INVARIANT_CHECK;
 
 	if (m_destructing) return false;
 
-	// we only deal with replies, not queries
-	TORRENT_ASSERT(m.message.dict_find_string_value("y") == "r");
+	// we only deal with replies and errors, not queries
+	TORRENT_ASSERT(m.message.dict_find_string_value("y") == "r"
+		|| m.message.dict_find_string_value("y") == "e");
 
 	// if we don't have the transaction id in our
 	// request list, ignore the packet
 
 	std::string transaction_id = m.message.dict_find_string_value("t");
+	if (transaction_id.empty()) return false;
 
 	std::string::const_iterator i = transaction_id.begin();	
 	int tid = transaction_id.size() != 2 ? -1 : io::read_uint16(i);
@@ -290,13 +295,17 @@ bool rpc_manager::incoming(msg const& m, node_id* id)
 	observer_ptr o;
 
 	for (transactions_t::iterator i = m_transactions.begin()
-		, end(m_transactions.end()); i != end; ++i)
+		, end(m_transactions.end()); i != end;)
 	{
 		TORRENT_ASSERT(*i);
-		if ((*i)->transaction_id() != tid) continue;
-		if (m.addr.address() != (*i)->target_addr()) continue;
+		if ((*i)->transaction_id() != tid
+			|| m.addr.address() != (*i)->target_addr())
+		{
+			++i;
+			continue;
+		}
 		o = *i;
-		m_transactions.erase(i);
+		i = m_transactions.erase(i);
 		break;
 	}
 
@@ -306,25 +315,37 @@ bool rpc_manager::incoming(msg const& m, node_id* id)
 		TORRENT_LOG(rpc) << "Reply with unknown transaction id size: " 
 			<< transaction_id.size() << " from " << m.addr;
 #endif
+		// this isn't necessarily because the other end is doing
+		// something wrong. This can also happen when we restart
+		// the node, and we prematurely abort all outstanding
+		// requests. Also, this opens up a potential magnification
+		// attack.
 //		entry e;
 //		incoming_error(e, "invalid transaction id");
-//		m_send(m_userdata, e, m.addr, 0);
+//		m_sock->send_packet(e, m.addr, 0);
 		return false;
 	}
 
+	ptime now = time_now_hires();
+
 #ifdef TORRENT_DHT_VERBOSE_LOGGING
 	std::ofstream reply_stats("round_trip_ms.log", std::ios::app);
-	reply_stats << m.addr << "\t" << total_milliseconds(time_now_hires() - o->sent())
+	reply_stats << m.addr << "\t" << total_milliseconds(now - o->sent())
 		<< std::endl;
 #endif
 
 	lazy_entry const* ret_ent = m.message.dict_find_dict("r");
 	if (ret_ent == 0)
 	{
+		// it may be an error
+		ret_ent = m.message.dict_find("e");
 		o->timeout();
-		entry e;
-		incoming_error(e, "missing 'r' key");
-		m_send(m_userdata, e, m.addr, 0);
+		if (ret_ent == NULL)
+		{
+			entry e;
+			incoming_error(e, "missing 'r' key");
+			m_sock->send_packet(e, m.addr, 0);
+		}
 		return false;
 	}
 
@@ -334,7 +355,17 @@ bool rpc_manager::incoming(msg const& m, node_id* id)
 		o->timeout();
 		entry e;
 		incoming_error(e, "missing 'id' key");
-		m_send(m_userdata, e, m.addr, 0);
+		m_sock->send_packet(e, m.addr, 0);
+		return false;
+	}
+
+	node_id nid = node_id(node_id_ent->string_ptr());
+	if (settings.enforce_node_id && !verify_id(nid, m.addr.address()))
+	{
+		o->timeout();
+		entry e;
+		incoming_error(e, "invalid node ID");
+		m_sock->send_packet(e, m.addr, 0);
 		return false;
 	}
 
@@ -343,11 +374,13 @@ bool rpc_manager::incoming(msg const& m, node_id* id)
 		<< tid << " from " << m.addr;
 #endif
 	o->reply(m);
-	*id = node_id(node_id_ent->string_ptr());
+	*id = nid;
+
+	int rtt = int(total_milliseconds(now - o->sent()));
 
 	// we found an observer for this reply, hence the node is not spoofing
 	// add it to the routing table
-	return m_table.node_seen(*id, m.addr);
+	return m_table.node_seen(*id, m.addr, rtt);
 }
 
 time_duration rpc_manager::tick()
@@ -355,7 +388,7 @@ time_duration rpc_manager::tick()
 	INVARIANT_CHECK;
 
 	const static int short_timeout = 1;
-	const static int timeout = 8;
+	const static int timeout = 15;
 
 	//	look for observers that have timed out
 
@@ -366,7 +399,7 @@ time_duration rpc_manager::tick()
 	time_duration ret = seconds(short_timeout);
 	ptime now = time_now();
 
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 	ptime last = min_time();
 	for (transactions_t::iterator i = m_transactions.begin();
 		i != m_transactions.end(); ++i)
@@ -395,7 +428,7 @@ time_duration rpc_manager::tick()
 		TORRENT_LOG(rpc) << "[" << o->m_algorithm.get() << "] Timing out transaction id: " 
 			<< (*i)->transaction_id() << " from " << o->target_ep();
 #endif
-		m_transactions.erase(i++);
+		i = m_transactions.erase(i);
 		timeouts.push_back(o);
 	}
 	
@@ -417,10 +450,10 @@ time_duration rpc_manager::tick()
 			break;
 		}
 		
+		// don't call short_timeout() again if we've
+		// already called it once
 		if (o->has_short_timeout()) continue;
 
-		// TODO: don't call short_timeout() again if we've
-		// already called it once
 		timeouts.push_back(o);
 	}
 
@@ -448,7 +481,7 @@ bool rpc_manager::invoke(entry& e, udp::endpoint target_addr
 	std::string transaction_id;
 	transaction_id.resize(2);
 	char* out = &transaction_id[0];
-	int tid = rand() ^ (rand() << 5);
+	int tid = (random() ^ (random() << 5)) & 0xffff;
 	io::write_uint16(tid, out);
 	e["t"] = transaction_id;
 		
@@ -460,10 +493,10 @@ bool rpc_manager::invoke(entry& e, udp::endpoint target_addr
 		<< e["q"].string() << " -> " << target_addr;
 #endif
 
-	if (m_send(m_userdata, e, target_addr, 1))
+	if (m_sock->send_packet(e, target_addr, 1))
 	{
 		m_transactions.push_back(o);
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 		o->m_was_sent = true;
 #endif
 		return true;
@@ -479,6 +512,10 @@ observer::~observer()
 	// reported back
 	TORRENT_ASSERT(m_was_sent == bool(flags & flag_done) || m_was_abandoned);
 	TORRENT_ASSERT(!m_in_constructor);
+#if TORRENT_USE_ASSERTS
+	TORRENT_ASSERT(m_in_use);
+	m_in_use = false;
+#endif
 }
 
 } } // namespace libtorrent::dht

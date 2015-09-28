@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2003, Arvid Norberg
+Copyright (c) 2003-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,8 +29,6 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 */
-
-#include "libtorrent/pch.hpp"
 
 #include <string>
 #include <cctype>
@@ -74,7 +72,7 @@ namespace libtorrent
 		char *p = &ret.back();
 		*p = '\0';
 		unsigned_size_type un = n;
-		if (n < 0)  un = -un;
+		if (n < 0)  un = -un; // TODO: warning C4146: unary minus operator applied to unsigned type, result still unsigned
 		do {
 			*--p = '0' + un % 10;
 			un /= 10;
@@ -238,8 +236,10 @@ namespace libtorrent
 			return url;
 
 		char msg[TORRENT_MAX_PATH*4];
-		snprintf(msg, sizeof(msg), "%s://%s%s%s:%d%s", protocol.c_str(), auth.c_str()
-			, auth.empty()?"":"@", host.c_str(), port
+		snprintf(msg, sizeof(msg), "%s://%s%s%s%s%s%s", protocol.c_str(), auth.c_str()
+			, auth.empty()?"":"@", host.c_str()
+			, port == -1 ? "" : ":"
+			, port == -1 ? "" : to_string(port).elems
 			, escape_path(path.c_str(), path.size()).c_str());
 		return msg;
 	}
@@ -450,7 +450,7 @@ namespace libtorrent
 		*out = '\0';
 	}
 
-	int hex_to_int(char in)
+	TORRENT_EXTRA_EXPORT int hex_to_int(char in)
 	{
 		if (in >= '0' && in <= '9') return int(in) - '0';
 		if (in >= 'A' && in <= 'F') return int(in) - 'A' + 10;
@@ -590,6 +590,7 @@ namespace libtorrent
 		ret.resize(ws.size() * 4 + 1);
 		std::size_t size = WideCharToMultiByte(CP_ACP, 0, ws.c_str(), -1, &ret[0], ret.size(), NULL, NULL);
 		if (size == std::size_t(-1)) return s;
+		if (size != 0 && ret[size - 1] == '\0') --size;
 		ret.resize(size);
 		return ret;
 	}
@@ -600,6 +601,7 @@ namespace libtorrent
 		ws.resize(s.size() + 1);
 		std::size_t size = MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, &ws[0], ws.size());
 		if (size == std::size_t(-1)) return s;
+		if (size != 0 && ws[size - 1] == '\0') --size;
 		ws.resize(size);
 		std::string ret;
 		libtorrent::wchar_utf8(ws, ret);

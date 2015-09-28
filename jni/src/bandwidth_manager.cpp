@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2009, Arvid Norberg
+Copyright (c) 2009-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -38,7 +38,7 @@ namespace libtorrent
 
 	bandwidth_manager::bandwidth_manager(int channel
 #ifdef TORRENT_VERBOSE_BANDWIDTH_LIMIT
-		, bool log = false
+		, bool log
 #endif		
 		)
 		: m_queued_bytes(0)
@@ -55,11 +55,20 @@ namespace libtorrent
 	void bandwidth_manager::close()
 	{
 		m_abort = true;
-		m_queue.clear();
+
+		queue_t tm;
+		tm.swap(m_queue);
 		m_queued_bytes = 0;
+
+		while (!tm.empty())
+		{
+			bw_request& bwr = tm.back();
+			bwr.peer->assign_bandwidth(m_channel, bwr.assigned);
+			tm.pop_back();
+		}
 	}
 
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 	bool bandwidth_manager::is_queued(bandwidth_socket const* peer) const
 	{
 		for (queue_t::const_iterator i = m_queue.begin()
@@ -76,7 +85,7 @@ namespace libtorrent
 		return m_queue.size();
 	}
 
-	int bandwidth_manager::queued_bytes() const
+	boost::int64_t bandwidth_manager::queued_bytes() const
 	{
 		return m_queued_bytes;
 	}
@@ -102,11 +111,17 @@ namespace libtorrent
 
 		bw_request bwr(peer, blk, priority);
 		int i = 0;
-		if (chan1 && chan1->throttle() > 0) bwr.channel[i++] = chan1;
-		if (chan2 && chan2->throttle() > 0) bwr.channel[i++] = chan2;
-		if (chan3 && chan3->throttle() > 0) bwr.channel[i++] = chan3;
-		if (chan4 && chan4->throttle() > 0) bwr.channel[i++] = chan4;
-		if (chan5 && chan5->throttle() > 0) bwr.channel[i++] = chan5;
+		if (chan1 && chan1->throttle() > 0 && chan1->need_queueing(blk))
+			bwr.channel[i++] = chan1;
+		if (chan2 && chan2->throttle() > 0 && chan2->need_queueing(blk))
+			bwr.channel[i++] = chan2;
+		if (chan3 && chan3->throttle() > 0 && chan3->need_queueing(blk))
+			bwr.channel[i++] = chan3;
+		if (chan4 && chan4->throttle() > 0 && chan4->need_queueing(blk))
+			bwr.channel[i++] = chan4;
+		if (chan5 && chan5->throttle() > 0 && chan5->need_queueing(blk))
+			bwr.channel[i++] = chan5;
+
 		if (i == 0)
 		{
 			// the connection is not rate limited by any of its
@@ -115,15 +130,16 @@ namespace libtorrent
 			// the queue, just satisfy the request immediately
 			return blk;
 		}
+
 		m_queued_bytes += blk;
 		m_queue.push_back(bwr);
 		return 0;
 	}
 
-#ifdef TORRENT_DEBUG
+#if TORRENT_USE_INVARIANT_CHECKS
 	void bandwidth_manager::check_invariant() const
 	{
-		int queued = 0;
+		boost::int64_t queued = 0;
 		for (queue_t::const_iterator i = m_queue.begin()
 			, end(m_queue.end()); i != end; ++i)
 		{
@@ -140,7 +156,7 @@ namespace libtorrent
 
 		INVARIANT_CHECK;
 
-		int dt_milliseconds = total_milliseconds(dt);
+		boost::int64_t dt_milliseconds = total_milliseconds(dt);
 		if (dt_milliseconds > 3000) dt_milliseconds = 3000;
 
 		// for each bandwidth channel, call update_quota(dt)
@@ -192,7 +208,7 @@ namespace libtorrent
 		for (std::vector<bandwidth_channel*>::iterator i = channels.begin()
 			, end(channels.end()); i != end; ++i)
 		{
-			(*i)->update_quota(dt_milliseconds);
+			(*i)->update_quota(int(dt_milliseconds));
 		}
 
 		for (queue_t::iterator i = m_queue.begin();

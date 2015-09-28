@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2008, Arvid Norberg
+Copyright (c) 2008-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,8 +30,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#include "libtorrent/pch.hpp"
-
 #include <cctype>
 #include <algorithm>
 #include <stdlib.h>
@@ -40,6 +38,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/http_parser.hpp"
 #include "libtorrent/assert.hpp"
 #include "libtorrent/escape_string.hpp"
+#include "libtorrent/parse_url.hpp" // for parse_url_components
 
 using namespace libtorrent;
 
@@ -60,6 +59,54 @@ namespace libtorrent
 			&& http_status < 400;
 	}
 
+	std::string resolve_redirect_location(std::string referrer
+		, std::string location)
+	{
+		if (location.empty()) return referrer;
+
+		error_code ec;
+		using boost::tuples::ignore;
+		boost::tie(ignore, ignore, ignore, ignore, ignore)
+			= parse_url_components(location, ec);
+
+		// if location is a full URL, just return it
+		if (!ec) return location;
+	
+		// otherwise it's likely to be just the path, or a relative path
+		std::string url = referrer;
+
+		if (location[0] == '/')
+		{
+			// it's an absolute path. replace the path component of
+			// referrer with location
+
+			// 8 is to skip the ur;l scheme://. We want the first slash
+			// that's part of the path.
+			std::size_t i = url.find_first_of('/', 8);
+			if (i == std::string::npos)
+				return location;
+			url.resize(i);
+			url += location;
+		}
+		else
+		{
+			// some web servers send out relative paths
+			// in the location header.
+			// remove the leaf filename
+			std::size_t i = url.find_last_of('/');
+			if (i == std::string::npos)
+				return location;
+
+			url.resize(i);
+
+			if ((url.empty() || url[url.size()-1] != '/')
+				&& (location.empty() || location[0] != '/'))
+				url += '/';
+			url += location;
+		}
+		return url;
+	}
+
 	http_parser::~http_parser() {}
 
 	http_parser::http_parser(int flags)
@@ -71,6 +118,7 @@ namespace libtorrent
 		, m_state(read_status)
 		, m_recv_buffer(0, 0)
 		, m_body_start_pos(0)
+		, m_connection_close(false)
 		, m_chunked_encoding(false)
 		, m_finished(false)
 		, m_cur_chunk_end(-1)
@@ -133,6 +181,10 @@ restart_response:
 			{
 				m_status_code = atoi(read_until(line, ' ', line_end).c_str());
 				m_server_message = read_until(line, '\r', line_end);
+
+				// HTTP 1.0 always closes the connection after
+				// each request
+				if (m_protocol == "HTTP/1.0") m_connection_close = true;
 			}
 			else
 			{
@@ -202,6 +254,10 @@ restart_response:
 				if (name == "content-length")
 				{
 					m_content_length = strtoll(value.c_str(), 0, 10);
+				}
+				else if (name == "connection")
+				{
+					m_connection_close = string_begins_no_case("close", value.c_str());
 				}
 				else if (name == "content-range")
 				{

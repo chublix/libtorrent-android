@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2007, Un Shyam & Arvid Norberg
+Copyright (c) 2007-2014, Un Shyam & Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -111,7 +111,7 @@ get_out:
 #elif defined TORRENT_USE_OPENSSL
 		// create local key
 		for (int i = 0; i < sizeof(m_dh_local_secret); ++i)
-			m_dh_local_secret[i] = random();
+			m_dh_local_secret[i] = random() & 0xff;
 
 		BIGNUM* prime = 0;
 		BIGNUM* secret = 0;
@@ -146,7 +146,7 @@ get_out:
 #elif defined TORRENT_USE_TOMMATH
 		// create local key
 		for (int i = 0; i < int(sizeof(m_dh_local_secret)); ++i)
-			m_dh_local_secret[i] = random();
+			m_dh_local_secret[i] = random() & 0xff;
 
 		mp_int prime;
 		mp_int secret;
@@ -225,6 +225,7 @@ get_out:
 		}
 
 get_out:
+		// TODO: 3 clean this up using destructors instead
 		if (prime) gcry_mpi_release(prime);
 		if (remote_key) gcry_mpi_release(remote_key);
 		if (secret) gcry_mpi_release(secret);

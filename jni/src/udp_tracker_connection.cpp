@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2003, Arvid Norberg
+Copyright (c) 2003-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,8 +29,6 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 */
-
-#include "libtorrent/pch.hpp"
 
 #include <vector>
 #include <cctype>
@@ -72,7 +70,6 @@ namespace libtorrent
 		, aux::session_impl& ses
 		, proxy_settings const& proxy)
 		: tracker_connection(man, req, ios, c)
-//		, m_man(man)
 		, m_abort(false)
 		, m_transaction_id(0)
 		, m_ses(ses)
@@ -85,12 +82,14 @@ namespace libtorrent
 	void udp_tracker_connection::start()
 	{
 		std::string hostname;
+		std::string protocol;
 		int port;
 		error_code ec;
 
 		using boost::tuples::ignore;
-		boost::tie(ignore, ignore, hostname, port, ignore)
+		boost::tie(protocol, ignore, hostname, port, ignore)
 			= parse_url_components(tracker_req().url, ec);
+		if (port == -1) port = protocol == "http" ? 80 : 443;
 
 		if (ec)
 		{
@@ -161,6 +160,12 @@ namespace libtorrent
 #endif
 		m_ses.m_io_service.post(boost::bind(
 			&udp_tracker_connection::start_announce, self()));
+
+		session_settings const& settings = m_ses.settings();
+		set_timeout(tracker_req().event == tracker_request::stopped
+			? settings.stop_tracker_timeout
+			: settings.tracker_completion_timeout
+			, settings.tracker_receive_timeout);
 	}
 
 	void udp_tracker_connection::name_lookup(error_code const& error
@@ -304,7 +309,6 @@ namespace libtorrent
 		boost::shared_ptr<request_callback> cb = requester();
 		if (cb) cb->debug_log("*** UDP_TRACKER [ timed out url: %s ]", tracker_req().url.c_str());
 #endif
-		m_abort = true;
 		fail(error_code(errors::timed_out));
 	}
 
@@ -546,9 +550,9 @@ namespace libtorrent
 		std::vector<peer_entry> peer_list;
 		for (int i = 0; i < num_peers; ++i)
 		{
-			// TODO: don't use a string here. The problem is that
-			// some trackers will respond with actual strings.
-			// Especially i2p trackers
+			// TODO: it would be more efficient to not use a string here.
+			// however, the problem is that some trackers will respond
+			// with actual strings. For example i2p trackers
 			peer_entry e;
 			char ip_string[100];
 			unsigned int a = detail::read_uint8(buf);
@@ -570,7 +574,7 @@ namespace libtorrent
 		}
 
 		cb->tracker_response(tracker_req(), m_target.address(), ip_list
-			, peer_list, interval, min_interval, complete, incomplete, address(), "" /*trackerid*/);
+			, peer_list, interval, min_interval, complete, incomplete, 0, address(), "" /*trackerid*/);
 
 		close();
 		return true;
@@ -686,7 +690,7 @@ namespace libtorrent
 			detail::write_string(request_string, out);
 		}
 
-		TORRENT_ASSERT(out - buf <= sizeof(buf));
+		TORRENT_ASSERT(out - buf <= int(sizeof(buf)));
 
 #if defined TORRENT_VERBOSE_LOGGING || defined TORRENT_LOGGING
 		boost::shared_ptr<request_callback> cb = requester();

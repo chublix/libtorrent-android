@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2007, Arvid Norberg
+Copyright (c) 2007-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,8 +29,6 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 */
-
-#include "libtorrent/pch.hpp"
 
 #include "libtorrent/socket.hpp"
 #include "libtorrent/session_settings.hpp"
@@ -76,18 +74,15 @@ namespace libtorrent
 		else if (ps.type == proxy_settings::none
 			|| (peer_connection && !ps.proxy_peer_connections))
 		{
-//			stream_socket* str;
 #ifdef TORRENT_USE_OPENSSL
 			if (ssl_context)
 			{
 				s.instantiate<ssl_stream<stream_socket> >(ios, ssl_context);
-//				str = &s.get<ssl_stream<stream_socket> >()->next_layer();
 			}
 			else
 #endif
 			{
 				s.instantiate<stream_socket>(ios);
-//				str = s.get<stream_socket>();
 			}
 		}
 		else if (ps.type == proxy_settings::http

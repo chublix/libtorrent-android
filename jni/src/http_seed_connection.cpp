@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2008, Arvid Norberg
+Copyright (c) 2008-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,8 +30,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#include "libtorrent/pch.hpp"
-
 #include <vector>
 #include <boost/limits.hpp>
 #include <boost/bind.hpp>
@@ -59,12 +57,9 @@ namespace libtorrent
 		, boost::weak_ptr<torrent> t
 		, boost::shared_ptr<socket_type> s
 		, tcp::endpoint const& remote
-		, std::string const& url
-		, policy::peer* peerinfo
-		, std::string const& auth
-		, web_seed_entry::headers_t const& extra_headers)
-		: web_connection_base(ses, t, s, remote, url, peerinfo, auth, extra_headers)
-		, m_url(url)
+		, web_seed_entry& web)
+		: web_connection_base(ses, t, s, remote, web)
+		, m_url(web.url)
 		, m_response_left(0)
 		, m_chunk_pos(0)
 		, m_partial_chunk_header(0)
@@ -80,8 +75,8 @@ namespace libtorrent
 
 		// multiply with the blocks per piece since that many requests are
 		// merged into one http request
-		m_max_out_request_queue = ses.settings().urlseed_pipeline_size
-			* blocks_per_piece;
+		max_out_request_queue(ses.settings().urlseed_pipeline_size
+			* blocks_per_piece);
 
 		prefer_whole_pieces(1);
 
@@ -117,9 +112,9 @@ namespace libtorrent
 		else
 		{
 			int receive_buffer_size = receive_buffer().left() - m_parser.body_start();
-			// TODO: in chunked encoding mode, this assert won't hold
+			// TODO: 1 in chunked encoding mode, this assert won't hold.
 			// the chunk headers should be subtracted from the receive_buffer_size
-			TORRENT_ASSERT(receive_buffer_size <= t->block_size());
+			TORRENT_ASSERT_VAL(receive_buffer_size <= t->block_size(), receive_buffer_size);
 			ret.bytes_downloaded = t->block_size() - receive_buffer_size;
 		}
 		// this is used to make sure that the block_index stays within

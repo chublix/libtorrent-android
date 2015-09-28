@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2007, Arvid Norberg
+Copyright (c) 2007-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,8 +29,6 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 */
-
-#include "libtorrent/pch.hpp"
 
 #ifndef TORRENT_DISABLE_EXTENSIONS
 
@@ -328,13 +326,13 @@ namespace
 			policy::peer* p = b.second.peer;
 
 			if (b.second.digest == ok_digest) return;
+			if (p == 0) return;
 
 #ifdef TORRENT_LOG_HASH_FAILURES
 			log_hash_block(&m_log_file, m_torrent, b.first.piece_index
 				, b.first.block_index, p->address(), j.buffer, j.buffer_size, false);
 #endif
 
-			if (p == 0) return;
 			if (!m_torrent.get_policy().has_peer(p)) return;
 
 #ifdef TORRENT_LOGGING

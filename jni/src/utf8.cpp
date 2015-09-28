@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2012, Arvid Norberg
+Copyright (c) 2012-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -40,7 +40,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 namespace libtorrent
 {
-	int utf8_wchar(const std::string &utf8, std::wstring &wide)
+	utf8_conv_result_t utf8_wchar(const std::string &utf8, std::wstring &wide)
 	{
 		// allocate space for worst-case
 		wide.resize(utf8.size());
@@ -52,28 +52,46 @@ namespace libtorrent
 			ret = ConvertUTF8toUTF32((const UTF8**)&src_start, (const UTF8*)src_start
 				+ utf8.size(), (UTF32**)&dst_start, (UTF32*)dst_start + wide.size()
 				, lenientConversion);
+			if (ret == sourceIllegal)
+			{
+				// assume Latin-1
+				wide.clear();
+				std::copy((boost::uint8_t const*)utf8.c_str()
+					, (boost::uint8_t const*)utf8.c_str() + utf8.size()
+					, std::back_inserter(wide));
+				return (utf8_conv_result_t)ret;
+			}
 			wide.resize(dst_start - wide.c_str());
-			return ret;
+			return (utf8_conv_result_t)ret;
 		}
 		else if (sizeof(wchar_t) == sizeof(UTF16))
 		{
 			ret = ConvertUTF8toUTF16((const UTF8**)&src_start, (const UTF8*)src_start
 				+ utf8.size(), (UTF16**)&dst_start, (UTF16*)dst_start + wide.size()
 				, lenientConversion);
+			if (ret == sourceIllegal)
+			{
+				// assume Latin-1
+				wide.clear();
+				std::copy((boost::uint8_t const*)utf8.c_str()
+					, (boost::uint8_t const*)utf8.c_str() + utf8.size()
+					, std::back_inserter(wide));
+				return (utf8_conv_result_t)ret;
+			}
 			wide.resize(dst_start - wide.c_str());
-			return ret;
+			return (utf8_conv_result_t)ret;
 		}
 		else
 		{
-			return sourceIllegal;
+			return source_illegal;
 		}
 	}
 
-	int wchar_utf8(const std::wstring &wide, std::string &utf8)
+	utf8_conv_result_t wchar_utf8(const std::wstring &wide, std::string &utf8)
 	{
 		// allocate space for worst-case
 		utf8.resize(wide.size() * 6);
-		if (wide.empty()) return 0;
+		if (wide.empty()) return conversion_ok;
 		char* dst_start = &utf8[0];
 		wchar_t const* src_start = wide.c_str();
 		ConversionResult ret;
@@ -83,7 +101,7 @@ namespace libtorrent
 				+ wide.size(), (UTF8**)&dst_start, (UTF8*)dst_start + utf8.size()
 				, lenientConversion);
 			utf8.resize(dst_start - &utf8[0]);
-			return ret;
+			return (utf8_conv_result_t)ret;
 		}
 		else if (sizeof(wchar_t) == sizeof(UTF16))
 		{
@@ -91,11 +109,11 @@ namespace libtorrent
 				+ wide.size(), (UTF8**)&dst_start, (UTF8*)dst_start + utf8.size()
 				, lenientConversion);
 			utf8.resize(dst_start - &utf8[0]);
-			return ret;
+			return (utf8_conv_result_t)ret;
 		}
 		else
 		{
-			return sourceIllegal;
+			return source_illegal;
 		}
 	}
 }

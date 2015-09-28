@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2003-2008, Arvid Norberg
+Copyright (c) 2003-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,8 +30,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#include "libtorrent/pch.hpp"
-
 #include <ctime>
 
 #if !defined TORRENT_NO_DEPRECATE && TORRENT_USE_IOSTREAM
@@ -55,6 +53,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 #include "libtorrent/config.hpp"
+#include "libtorrent/ConvertUTF.h"
 #include "libtorrent/torrent_info.hpp"
 #include "libtorrent/escape_string.hpp" // is_space
 #include "libtorrent/bencode.hpp"
@@ -65,6 +64,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/time.hpp"
 #include "libtorrent/invariant_check.hpp"
 #include "libtorrent/session_settings.hpp"
+#include "libtorrent/add_torrent_params.hpp"
+#include "libtorrent/magnet_uri.hpp"
 
 #if TORRENT_USE_I2P
 #include "libtorrent/parse_url.hpp"
@@ -89,87 +90,69 @@ namespace libtorrent
 	// in paths
 	TORRENT_EXTRA_EXPORT bool verify_encoding(std::string& target, bool fix_paths = false)
 	{
+		if (target.empty()) return true;
+
 		std::string tmp_path;
 		bool valid_encoding = true;
-		for (std::string::iterator i = target.begin()
-			, end(target.end()); i != end; ++i)
+
+		UTF8 const* ptr = (UTF8 const*)&target[0];
+		UTF8 const* end = (UTF8 const*)&target[0] + target.size();
+		while (ptr < end)
 		{
-			// valid ascii-character
-			if ((*i & 0x80) == 0)
+			UTF32 codepoint;
+			UTF32* cp = &codepoint;
+			
+			// decode a single utf-8 character
+			ConversionResult res = ConvertUTF8toUTF32(&ptr, end, &cp, cp + 1
+				, lenientConversion);
+
+			// this was the last character, and nothing was
+			// written to the destination buffer (i.e. the source character was
+			// truncated)
+			if (res == sourceExhausted
+				|| res == sourceIllegal)
 			{
-				// replace invalid characters with '_'
-				if (!fix_paths || valid_path_character(*i))
+				if (cp == &codepoint)
 				{
-					tmp_path += *i;
-				}
-				else
-				{
-					tmp_path += '_';
+					if (res == sourceExhausted)
+						ptr = end;
+					else
+						++ptr;
+
+					codepoint = '_';
 					valid_encoding = false;
 				}
-				continue;
 			}
-			
-			if (end - i < 2)
+			else if ((res != conversionOK && res != targetExhausted)
+				|| codepoint == UNI_REPLACEMENT_CHAR)
 			{
-				tmp_path += "_";
+				// we expect the conversion to fail with targetExhausted, since we
+				// only pass in a single destination character slot. The last
+				// character will succeed though. Also, if the character was replaced,
+				// use our own replacement symbol (underscore).
+				codepoint = '_';
 				valid_encoding = false;
-				break;
-			}
-			
-			// valid 2-byte utf-8 character
-			if ((i[0] & 0xe0) == 0xc0
-				&& (i[1] & 0xc0) == 0x80)
-			{
-				tmp_path += i[0];
-				tmp_path += i[1];
-				i += 1;
-				continue;
 			}
 
-			if (end - i < 3)
+			// if fix paths is true, also replace characters that are invalid
+			// in filenames
+			if (fix_paths && codepoint < 0x7f && !valid_path_character(codepoint))
 			{
-				tmp_path += "_";
+				codepoint = '_';
 				valid_encoding = false;
-				break;
 			}
 
-			// valid 3-byte utf-8 character
-			if ((i[0] & 0xf0) == 0xe0
-				&& (i[1] & 0xc0) == 0x80
-				&& (i[2] & 0xc0) == 0x80)
-			{
-				tmp_path += i[0];
-				tmp_path += i[1];
-				tmp_path += i[2];
-				i += 2;
-				continue;
-			}
+			// encode codepoint into utf-8
+			cp = &codepoint;
+			UTF8 sequence[5];
+			UTF8* start = sequence;
+			res = ConvertUTF32toUTF8((const UTF32**)&cp, cp + 1, &start, start + 5, lenientConversion);
+			TORRENT_ASSERT(res == conversionOK);
 
-			if (end - i < 4)
-			{
-				tmp_path += "_";
-				valid_encoding = false;
-				break;
-			}
-
-			// valid 4-byte utf-8 character
-			if ((i[0] & 0xf8) == 0xf0
-				&& (i[1] & 0xc0) == 0x80
-				&& (i[2] & 0xc0) == 0x80
-				&& (i[3] & 0xc0) == 0x80)
-			{
-				tmp_path += i[0];
-				tmp_path += i[1];
-				tmp_path += i[2];
-				tmp_path += i[3];
-				i += 3;
-				continue;
-			}
-
-			tmp_path += "_";
-			valid_encoding = false;
+			for (int i = 0; i < start - sequence; ++i)
+				tmp_path += (char)sequence[i];
 		}
+
 		// the encoding was not valid utf-8
 		// save the original encoding and replace the
 		// commonly used path with the correctly
@@ -189,53 +172,67 @@ namespace libtorrent
 		return true;
 	}
 
-	void trim_path_element(std::string& element)
+	TORRENT_EXTRA_EXPORT void trim_path_element(std::string& element)
 	{
 		const int max_path_len = TORRENT_MAX_PATH;
 
 		// on windows, the max path is expressed in
 		// unicode characters, not bytes
-#if defined TORRENT_WINDOWS
+#if defined TORRENT_WINDOWS && TORRENT_USE_WSTRING
 		std::wstring path_element;
 		utf8_wchar(element, path_element);
-		if (path_element.size() <= max_path_len) return;
-
-		// truncate filenames that are too long. But keep extensions!
-		std::wstring ext;
-		wchar_t const* ext1 = wcsrchr(path_element.c_str(), '.');
-		if (ext1 != NULL) ext = ext1;
-
-		if (ext.size() > 15)
+		if (path_element.size() > max_path_len)
 		{
-			path_element.resize(max_path_len);
-		}
-		else
-		{
-			path_element.resize(max_path_len - ext.size());
-			path_element += ext;
+			// truncate filenames that are too long. But keep extensions!
+			std::wstring ext;
+			wchar_t const* ext1 = wcsrchr(path_element.c_str(), '.');
+			if (ext1 != NULL) ext = ext1;
+
+			if (ext.size() > 15)
+			{
+				path_element.resize(max_path_len);
+			}
+			else
+			{
+				path_element.resize(max_path_len - ext.size());
+				path_element += ext;
+			}
 		}
 		// remove trailing spaces and dots. These aren't allowed in filenames on windows
 		for (int i = path_element.size() - 1; i >= 0; --i)
 		{
 			if (path_element[i] != L' ' && path_element[i] != L'.') break;
-			path_element[i] = L'_';
+			path_element.resize(i);
 		}
+		if (path_element.empty()) path_element = L"_";
 		wchar_utf8(path_element, element);
 #else
 		std::string& path_element = element;
-		if (int(path_element.size()) <= max_path_len) return;
+		if (int(path_element.size()) > max_path_len)
+		{
 
-		// truncate filenames that are too long. But keep extensions!
-		std::string ext = extension(path_element);
-		if (ext.size() > 15)
-		{
-			path_element.resize(max_path_len);
+			// truncate filenames that are too long. But keep extensions!
+			std::string ext = extension(path_element);
+			if (ext.size() > 15)
+			{
+				path_element.resize(max_path_len);
+			}
+			else
+			{
+				path_element.resize(max_path_len - ext.size());
+				path_element += ext;
+			}
 		}
-		else
+
+		// remove trailing spaces and dots. These aren't allowed in filenames on windows
+		// apply rules consistently across platforms though
+		for (int i = path_element.size() - 1; i >= 0; --i)
 		{
-			path_element.resize(max_path_len - ext.size());
-			path_element += ext;
+			if (path_element[i] != ' ' && path_element[i] != '.') break;
+			path_element.resize(i);
 		}
+
+		if (path_element.empty()) path_element = "_";
 #endif
 	}
 
@@ -353,6 +350,10 @@ namespace libtorrent
 				target.symlink_path = combine_path(target.symlink_path, path_element);
 			}
 		}
+		else
+		{
+			target.symlink_attribute = false;
+		}
 
 		return true;
 	}
@@ -402,27 +403,32 @@ namespace libtorrent
 			// as long as this file already exists
 			// increase the counter
 			int cnt = 0;
-			while (!files.insert(e.path).second)
+			if (!files.insert(e.path).second)
 			{
-				++cnt;
-				char suffix[50];
-				snprintf(suffix, sizeof(suffix), "%d%s", cnt, extension(e.path).c_str());
-				replace_extension(e.path, suffix);
+				std::string base = remove_extension(e.path);
+				std::string ext = extension(e.path);
+				do
+				{
+					++cnt;
+					char new_ext[50];
+					snprintf(new_ext, sizeof(new_ext), ".%d%s", cnt, ext.c_str());
+					e.path = base + new_ext;
+				} while (!files.insert(e.path).second);
 			}
 			target.add_file(e, file_hash ? file_hash->string_ptr() + info_ptr_diff : 0);
 
 			// This is a memory optimization! Instead of having
 			// each entry keep a string for its filename, make it
 			// simply point into the info-section buffer
-			internal_file_entry const& fe = *target.rbegin();
-			// TODO: once the filename renaming is removed from here
+			int last_index = target.num_files() - 1;
+			// TODO: 1 once the filename renaming is removed from here
 			// this check can be removed as well
-			if (fee && fe.filename() == fee->string_value())
+			if (fee && target.file_name(last_index) == fee->string_value())
 			{
 				// this string pointer does not necessarily point into
 				// the m_info_section buffer.
 				char const* str_ptr = fee->string_ptr() + info_ptr_diff;
-				const_cast<internal_file_entry&>(fe).set_name(str_ptr, fee->string_length());
+				target.rename_file_borrow(last_index, str_ptr, fee->string_length());
 			}
 		}
 		return true;
@@ -459,7 +465,7 @@ namespace libtorrent
 		return ret;
 	}
 
-	int load_file(std::string const& filename, std::vector<char>& v, error_code& ec, int limit)
+	int load_file(std::string const& filename, std::vector<char>& v, error_code& ec, int limit = 8000000)
 	{
 		ec.clear();
 		file f;
@@ -471,7 +477,7 @@ namespace libtorrent
 			ec = error_code(errors::metadata_too_large, get_libtorrent_category());
 			return -2;
 		}
-		v.resize(s);
+		v.resize((unsigned int)s);
 		if (s == 0) return 0;
 		file::iovec_t b = {&v[0], size_t(s) };
 		size_type read = f.readv(0, &b, 1, ec);
@@ -484,6 +490,9 @@ namespace libtorrent
 		: url(u)
 		, next_announce(min_time())
 		, min_announce(min_time())
+		, scrape_incomplete(-1)
+		, scrape_complete(-1)
+		, scrape_downloaded(-1)
 		, tier(0)
 		, fail_limit(0)
 		, fails(0)
@@ -498,6 +507,9 @@ namespace libtorrent
 	announce_entry::announce_entry()
 		: next_announce(min_time())
 		, min_announce(min_time())
+		, scrape_incomplete(-1)
+		, scrape_complete(-1)
+		, scrape_downloaded(-1)
 		, tier(0)
 		, fail_limit(0)
 		, fails(0)
@@ -554,10 +566,13 @@ namespace libtorrent
 		, headers_t const& extra_headers_)
 		: url(url_), type(type_)
 		, auth(auth_), extra_headers(extra_headers_)
-		, retry(time_now()), resolving(false), removed(false)
-		, peer_info(0, true, 0)
+		, retry(time_now())
+		, supports_keepalive(true)
+		, resolving(false), removed(false)
+		, peer_info(tcp::endpoint(), true, 0)
 	{
 		peer_info.web_seed = true;
+		restart_request.piece = -1;
 	}
 
 	torrent_info::torrent_info(torrent_info const& t, int flags)
@@ -571,9 +586,6 @@ namespace libtorrent
 		, m_piece_hashes(t.m_piece_hashes)
 		, m_comment(t.m_comment)
 		, m_created_by(t.m_created_by)
-#ifdef TORRENT_USE_OPENSSL
-		, m_ssl_root_cert(t.m_ssl_root_cert)
-#endif
 		, m_creation_date(t.m_creation_date)
 		, m_info_hash(t.m_info_hash)
 		, m_info_section_size(t.m_info_section_size)
@@ -581,7 +593,7 @@ namespace libtorrent
 		, m_private(t.m_private)
 		, m_i2p(t.m_i2p)
 	{
-#if defined TORRENT_DEBUG && !defined TORRENT_DISABLE_INVARIANT_CHECKS
+#if TORRENT_USE_INVARIANT_CHECKS
 		t.check_invariant();
 #endif
 		if (m_info_section_size > 0)
@@ -589,11 +601,14 @@ namespace libtorrent
 			error_code ec;
 			m_info_section.reset(new char[m_info_section_size]);
 			memcpy(m_info_section.get(), t.m_info_section.get(), m_info_section_size);
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS || !defined BOOST_NO_EXCEPTIONS
 			int ret =
 #endif
 				lazy_bdecode(m_info_section.get(), m_info_section.get()
 				+ m_info_section_size, m_info_dict, ec);
+#ifndef BOOST_NO_EXCEPTIONS
+			if (ret != 0) throw libtorrent_exception(ec);
+#endif
 			TORRENT_ASSERT(ret == 0);
 
 			ptrdiff_t offset = m_info_section.get() - t.m_info_section.get();
@@ -640,7 +655,7 @@ namespace libtorrent
 		if (tmp.size() == 0 || lazy_bdecode(&tmp[0], &tmp[0] + tmp.size(), e, ec) != 0)
 		{
 #ifndef BOOST_NO_EXCEPTIONS
-			throw invalid_torrent_file(errors::invalid_bencoding);
+			throw invalid_torrent_file(ec);
 #endif
 			return;
 		}
@@ -741,6 +756,12 @@ namespace libtorrent
 			throw invalid_torrent_file(ec);
 
 		INVARIANT_CHECK;
+	}
+
+	void torrent_info::rename_file(int index, std::wstring const& new_filename)
+	{
+		copy_on_write();
+		m_files.rename_file_deprecated(index, new_filename);
 	}
 #endif // TORRENT_NO_DEPRECATE
 #endif // TORRENT_USE_WSTRING
@@ -870,9 +891,6 @@ namespace libtorrent
 		swap(m_creation_date, ti.m_creation_date);
 		m_comment.swap(ti.m_comment);
 		m_created_by.swap(ti.m_created_by);
-#ifdef TORRENT_USE_OPENSSL
-		m_ssl_root_cert.swap(ti.m_ssl_root_cert);
-#endif
 		boost::uint32_t tmp;
 		SWAP(m_multifile, ti.m_multifile);
 		SWAP(m_private, ti.m_private);
@@ -886,6 +904,20 @@ namespace libtorrent
 	}
 
 #undef SWAP
+
+	std::string torrent_info::ssl_cert() const
+	{
+		// this is parsed lazily
+		if (m_info_dict.type() == lazy_entry::none_t)
+		{
+			error_code ec;
+			lazy_bdecode(m_info_section.get(), m_info_section.get()
+				+ m_info_section_size, m_info_dict, ec);
+			if (ec) return "";
+		}
+		if (m_info_dict.type() != lazy_entry::dict_t) return "";
+		return m_info_dict.dict_find_string_value("ssl-cert");
+	}
 
 	bool torrent_info::parse_info_section(lazy_entry const& info, error_code& ec, int flags)
 	{
@@ -956,7 +988,7 @@ namespace libtorrent
 			e.size = info.dict_find_int_value("length", -1);
 			if (e.size < 0)
 			{
-				ec = errors::torrent_file_parse_failed;
+				ec = errors::torrent_invalid_length;
 				return false;
 			}
 			e.mtime = info.dict_find_int_value("mtime", 0);
@@ -985,17 +1017,17 @@ namespace libtorrent
 					e.symlink_path = combine_path(e.symlink_path, path_element);
 				}
 			}
+			else
+			{
+				e.symlink_attribute = false;
+			}
+
 			lazy_entry const* fh = info.dict_find_string("sha1");
 			if (fh && fh->string_length() != 20) fh = 0;
 
 			// bitcomet pad file
 			if (e.path.find("_____padding_file_") != std::string::npos)
 				e.pad_file = true;
-			if (e.size < 0)
-			{
-				ec = errors::torrent_invalid_length;
-				return false;
-			}
 			m_files.add_file(e, fh ? fh->string_ptr() + info_ptr_diff : 0);
 			m_multifile = false;
 		}
@@ -1008,7 +1040,7 @@ namespace libtorrent
 			}
 			m_multifile = true;
 		}
-		m_files.set_name(name);
+		TORRENT_ASSERT(!m_files.name().empty());
 
 		// extract sha-1 hashes for all pieces
 		// we want this division to round upwards, that's why we have the
@@ -1017,10 +1049,9 @@ namespace libtorrent
 		m_files.set_num_pieces(int((m_files.total_size() + m_files.piece_length() - 1)
 			/ m_files.piece_length()));
 
-		lazy_entry const* pieces = info.dict_find("pieces");
-		lazy_entry const* root_hash = info.dict_find("root hash");
-		if ((pieces == 0 || pieces->type() != lazy_entry::string_t)
-			&& (root_hash == 0 || root_hash->type() != lazy_entry::string_t))
+		lazy_entry const* pieces = info.dict_find_string("pieces");
+		lazy_entry const* root_hash = info.dict_find_string("root hash");
+		if (pieces == 0 && root_hash == 0)
 		{
 			ec = errors::torrent_missing_pieces;
 			return false;
@@ -1055,10 +1086,6 @@ namespace libtorrent
 		}
 
 		m_private = info.dict_find_int_value("private", 0);
-
-#ifdef TORRENT_USE_OPENSSL
-		m_ssl_root_cert = info.dict_find_string_value("ssl-cert");
-#endif
 
 		return true;
 	}
@@ -1161,6 +1188,23 @@ namespace libtorrent
 		lazy_entry const* info = torrent_file.dict_find_dict("info");
 		if (info == 0)
 		{
+			lazy_entry const* link = torrent_file.dict_find_string("magnet-uri");
+			if (link)
+			{
+				std::string uri = link->string_value();
+
+				add_torrent_params p;
+				parse_magnet_uri(uri, p, ec);
+				if (ec) return false;
+
+				m_info_hash = p.info_hash;
+				for (std::vector<std::string>::iterator i = p.trackers.begin()
+					, end(p.trackers.end()); i != end; ++i)
+					m_urls.push_back(*i);
+
+				return true;
+			}
+
 			ec = errors::torrent_missing_info;
 			return false;
 		}
@@ -1390,30 +1434,30 @@ namespace libtorrent
 		os << "number of pieces: " << num_pieces() << "\n";
 		os << "piece length: " << piece_length() << "\n";
 		os << "files:\n";
-		for (file_storage::iterator i = m_files.begin(); i != m_files.end(); ++i)
-			os << "  " << std::setw(11) << i->size << "  " << m_files.file_path(*i) << "\n";
+		for (int i = 0; i < m_files.num_files(); ++i)
+			os << "  " << std::setw(11) << m_files.file_size(i)
+				<< "  " << m_files.file_path(i) << "\n";
 	}
 
 // ------- end deprecation -------
 #endif
 
-#ifdef TORRENT_DEBUG
+#if TORRENT_USE_INVARIANT_CHECKS
 	void torrent_info::check_invariant() const
 	{
-		for (file_storage::iterator i = m_files.begin()
-			, end(m_files.end()); i != end; ++i)
+		for (int i = 0; i < m_files.num_files(); ++i)
 		{
-			TORRENT_ASSERT(i->name != 0);
-			if (i->name_len > 0)
+			TORRENT_ASSERT(m_files.file_name_ptr(i) != 0);
+			if (m_files.file_name_len(i) != -1)
 			{
 				// name needs to point into the allocated info section buffer
-				TORRENT_ASSERT(i->name >= m_info_section.get());
-				TORRENT_ASSERT(i->name < m_info_section.get() + m_info_section_size);
+				TORRENT_ASSERT(m_files.file_name_ptr(i) >= m_info_section.get());
+				TORRENT_ASSERT(m_files.file_name_ptr(i) < m_info_section.get() + m_info_section_size);
 			}
 			else
 			{
 				// name must be a valid string
-				TORRENT_ASSERT(strlen(i->name) < 2048);
+				TORRENT_ASSERT(strlen(m_files.file_name_ptr(i)) < 2048);
 			}
 		}
 

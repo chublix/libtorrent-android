@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2007, Arvid Norberg
+Copyright (c) 2007-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -49,10 +49,10 @@ POSSIBILITY OF SUCH DAMAGE.
 
 namespace libtorrent {
 
-enum { max_bottled_buffer = 5 * 1024 * 1024 };
-
 http_connection::http_connection(io_service& ios, connection_queue& cc
-	, http_handler const& handler, bool bottled
+	, http_handler const& handler
+	, bool bottled
+	, int max_bottled_buffer_size
 	, http_connect_handler const& ch
 	, http_filter_handler const& fh
 #ifdef TORRENT_USE_OPENSSL
@@ -72,6 +72,7 @@ http_connection::http_connection(io_service& ios, connection_queue& cc
 	, m_last_receive(time_now())
 	, m_start_time(time_now())
 	, m_bottled(bottled)
+	, m_max_bottled_buffer_size(max_bottled_buffer_size)
 	, m_called(false)
 #ifdef TORRENT_USE_OPENSSL
 	, m_ssl_ctx(ssl_ctx)
@@ -120,6 +121,7 @@ void http_connection::get(std::string const& url, time_duration timeout, int pri
 		= parse_url_components(url, ec);
 
 	int default_port = protocol == "https" ? 443 : 80;
+	if (port == -1) port = default_port;
 
 	// keep ourselves alive even if the callback function
 	// deletes this object
@@ -187,14 +189,14 @@ void http_connection::get(std::string const& url, time_duration timeout, int pri
 
 //	APPEND_FMT("Accept: */*\r\n");
 
-	if (!auth.empty())
-		APPEND_FMT1("Authorization: Basic %s\r\n", base64encode(auth).c_str());
-
 	if (!m_user_agent.empty())
 		APPEND_FMT1("User-Agent: %s\r\n", m_user_agent.c_str());
 	
 	if (m_bottled)
 		APPEND_FMT("Accept-Encoding: gzip\r\n");
+
+	if (!auth.empty())
+		APPEND_FMT1("Authorization: Basic %s\r\n", base64encode(auth).c_str());
 
 	APPEND_FMT("Connection: close\r\n\r\n");
 
@@ -404,6 +406,8 @@ void http_connection::on_timeout(boost::weak_ptr<http_connection> p
 	if (!c) return;
 
 	if (e == asio::error::operation_aborted) return;
+
+	if (c->m_abort) return;
 
 	ptime now = time_now_hires();
 
@@ -620,7 +624,7 @@ void http_connection::on_connect(error_code const& e)
 	}
 }
 
-void http_connection::callback(error_code e, char const* data, int size)
+void http_connection::callback(error_code e, char* data, int size)
 {
 	if (m_bottled && m_called) return;
 
@@ -632,10 +636,12 @@ void http_connection::callback(error_code e, char const* data, int size)
 		std::string const& encoding = m_parser.header("content-encoding");
 		if ((encoding == "gzip" || encoding == "x-gzip") && size > 0 && data)
 		{
-			std::string error;
-			if (inflate_gzip(data, size, buf, max_bottled_buffer, error))
+			error_code ec;
+			inflate_gzip(data, size, buf, m_max_bottled_buffer_size, ec);
+
+			if (ec)
 			{
-				if (m_handler) m_handler(errors::http_failed_decompress, m_parser, data, size, *this);
+				if (m_handler) m_handler(ec, m_parser, data, size, *this);
 				close();
 				return;
 			}
@@ -727,11 +733,11 @@ void http_connection::on_read(error_code const& e
 	{
 		error_code ec = asio::error::eof;
 		TORRENT_ASSERT(bytes_transferred == 0);
-		char const* data = 0;
+		char* data = 0;
 		std::size_t size = 0;
 		if (m_bottled && m_parser.header_finished())
 		{
-			data = m_parser.get_body().begin;
+			data = &m_recvbuffer[0] + m_parser.body_start();
 			size = m_parser.get_body().left();
 		}
 		callback(ec, data, size);
@@ -769,7 +775,7 @@ void http_connection::on_read(error_code const& e
 		{
 			int code = m_parser.status_code();
 
-			if (code >= 300 && code < 400)
+			if (is_redirect(code))
 			{
 				// attempt a redirect
 				std::string const& location = m_parser.header("location");
@@ -787,39 +793,14 @@ void http_connection::on_read(error_code const& e
 				// in its handler. For now, just kill the connection.
 //				async_shutdown(m_sock, shared_from_this());
 				m_sock.close(ec);
-				using boost::tuples::ignore;
-				boost::tie(ignore, ignore, ignore, ignore, ignore)
-					= parse_url_components(location, ec);
-				if (!ec)
-				{
-					get(location, m_completion_timeout, m_priority, &m_proxy, m_redirects - 1
-						, m_user_agent, m_bind_addr
-#if TORRENT_USE_I2P
-						, m_i2p_conn
-#endif
-						);
-				}
-				else
-				{
-					// some broken web servers send out relative paths
-					// in the location header.
-					std::string url = m_url;
-					// remove the leaf filename
-					std::size_t i = url.find_last_of('/');
-					if (i != std::string::npos)
-						url.resize(i);
-					if ((url.empty() || url[url.size()-1] != '/')
-						&& (location.empty() || location[0] != '/'))
-						url += '/';
-					url += location;
 
-					get(url, m_completion_timeout, m_priority, &m_proxy, m_redirects - 1
-						, m_user_agent, m_bind_addr
+				std::string url = resolve_redirect_location(m_url, location);
+				get(url, m_completion_timeout, m_priority, &m_proxy, m_redirects - 1
+					, m_user_agent, m_bind_addr
 #if TORRENT_USE_I2P
-						, m_i2p_conn
+					, m_i2p_conn
 #endif
-						);
-				}
+					);
 				return;
 			}
 	
@@ -838,7 +819,7 @@ void http_connection::on_read(error_code const& e
 		{
 			error_code ec;
 			m_timer.cancel(ec);
-			callback(e, m_parser.get_body().begin, m_parser.get_body().left());
+			callback(e, &m_recvbuffer[0] + m_parser.body_start(), m_parser.get_body().left());
 		}
 	}
 	else
@@ -851,13 +832,13 @@ void http_connection::on_read(error_code const& e
 
 	// if we've hit the limit, double the buffer size
 	if (int(m_recvbuffer.size()) == m_read_pos)
-		m_recvbuffer.resize((std::min)(m_read_pos * 2, int(max_bottled_buffer)));
+		m_recvbuffer.resize((std::min)(m_read_pos * 2, m_max_bottled_buffer_size));
 
-	if (m_read_pos == max_bottled_buffer)
+	if (m_read_pos == m_max_bottled_buffer_size)
 	{
 		// if we've reached the size limit, terminate the connection and
 		// report the error
-		callback(error_code(boost::system::errc::file_too_large, get_posix_category()));
+		callback(error_code(boost::system::errc::file_too_large, generic_category()));
 		close();
 		return;
 	}

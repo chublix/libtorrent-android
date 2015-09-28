@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2003, Arvid Norberg
+Copyright (c) 2003-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,8 +29,6 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 */
-
-#include "libtorrent/pch.hpp"
 
 #include <vector>
 #include <cctype>
@@ -133,8 +131,8 @@ namespace libtorrent
 		if (m_completion_timeout > 0)
 		{
 			timeout = timeout == 0
-				? m_completion_timeout - total_seconds(m_read_time - m_start_time)
-				: (std::min)(m_completion_timeout  - total_seconds(m_read_time - m_start_time), timeout);
+				? int(m_completion_timeout - total_seconds(m_read_time - m_start_time))
+				: (std::min)(int(m_completion_timeout - total_seconds(m_read_time - m_start_time)), timeout);
 		}
 #if defined TORRENT_ASIO_DEBUGGING
 		add_outstanding_async("timeout_handler::timeout_callback");
@@ -282,9 +280,16 @@ namespace libtorrent
 		con->start();
 	}
 
-	bool tracker_manager::incoming_udp(error_code const& e
+	bool tracker_manager::incoming_packet(error_code const& e
 		, udp::endpoint const& ep, char const* buf, int size)
 	{
+		// filter out packets that are obviously not UDP tracker packets
+		if (size < 8) return false;
+
+		const char* ptr = buf;
+		int action = detail::read_int32(ptr);
+		if (action > 3) return false;
+
 		for (tracker_connections_t::iterator i = m_connections.begin();
 			i != m_connections.end();)
 		{
@@ -296,9 +301,16 @@ namespace libtorrent
 		return false;
 	}
 
-	bool tracker_manager::incoming_udp(error_code const& e
+	bool tracker_manager::incoming_packet(error_code const& e
 		, char const* hostname, char const* buf, int size)
 	{
+		// filter out packets that are obviously not UDP tracker packets
+		if (size < 8) return false;
+
+		const char* ptr = buf;
+		int action = detail::read_int32(ptr);
+		if (action > 3) return false;
+
 		for (tracker_connections_t::iterator i = m_connections.begin();
 			i != m_connections.end();)
 		{

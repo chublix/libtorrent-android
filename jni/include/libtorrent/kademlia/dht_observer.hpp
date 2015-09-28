@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2011, Arvid Norberg, Magnus Jonsson
+Copyright (c) 2012-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,30 +30,19 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#ifndef TORRENT_STRUCT_DEBUG
-#define TORRENT_STRUCT_DEBUG
+#ifndef DHT_OBSERVER_HPP
+#define DHT_OBSERVER_HPP
 
-#define PRINT_SIZEOF(x) snprintf(tmp, sizeof(tmp), "\nsizeof(" #x ") = %d\n", int(sizeof(x))); \
-	l << tmp; \
-	temp = 0; \
-	prev_size = 0;
+#include "libtorrent/address.hpp"
 
-#define PRINT_OFFSETOF(x, y) if (offsetof(x, y) > 0) { \
-		snprintf(tmp, sizeof(tmp), "\tsize: %-3d\tpadding: %-3d\n" \
-		, prev_size \
-		, int((offsetof(x, y) - temp)) - prev_size); \
-		l << tmp; \
-	} \
-	snprintf(tmp, sizeof(tmp), "%-50s: %-3d" \
-		, #x "::" #y \
-		, int(offsetof(x, y))); \
-	temp = offsetof(x, y); \
-	prev_size = sizeof(reinterpret_cast<x*>(0)->y); \
-	l << tmp;
+namespace libtorrent { namespace dht
+{
+	struct dht_observer
+	{
+		virtual void set_external_address(address const& addr
+			, address const& source) = 0;
+	};
+}}
 
-#define PRINT_OFFSETOF_END(x) snprintf(tmp, sizeof(tmp), "\tsize: %-3d\tpadding: %-3d\n" \
-	, prev_size, int((sizeof(x) - temp) - prev_size)); \
-	l << tmp;
-
-#endif // TORRENT_STRUCT_DEBUG
+#endif
 

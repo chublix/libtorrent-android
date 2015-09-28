@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2006, Arvid Norberg
+Copyright (c) 2006-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -39,8 +39,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <boost/utility.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <boost/array.hpp>
+#include <boost/noncopyable.hpp>
 #include <set>
-#include <list>
 
 #include <libtorrent/kademlia/logging.hpp>
 
@@ -70,7 +70,6 @@ struct routing_table_node
 {
 	bucket_t replacements;
 	bucket_t live_nodes;
-	ptime last_active;
 };
 
 // differences in the implementation from the description in
@@ -83,7 +82,7 @@ struct routing_table_node
 // 	bucket has failed, then it is put in the replacement
 // 	cache (just like in the paper).
 
-class TORRENT_EXTRA_EXPORT routing_table
+class TORRENT_EXTRA_EXPORT routing_table : boost::noncopyable
 {
 public:
 	typedef std::vector<routing_table_node> table_t;
@@ -104,28 +103,34 @@ public:
 	router_iterator router_begin() const { return m_router_nodes.begin(); }
 	router_iterator router_end() const { return m_router_nodes.end(); }
 
-	bool add_node(node_entry const& e);
+	enum add_node_status_t {
+		failed_to_add = 0,
+		node_added,
+		need_bucket_split
+	};
+	add_node_status_t add_node_impl(node_entry e);
+
+	bool add_node(node_entry e);
 
 	// this function is called every time the node sees
 	// a sign of a node being alive. This node will either
 	// be inserted in the k-buckets or be moved to the top
 	// of its bucket.
-	bool node_seen(node_id const& id, udp::endpoint ep);
+	bool node_seen(node_id const& id, udp::endpoint ep, int rtt);
 
 	// this may add a node to the routing table and mark it as
 	// not pinged. If the bucket the node falls into is full,
 	// the node will be ignored.
 	void heard_about(node_id const& id, udp::endpoint const& ep);
 	
-	// if any bucket in the routing table needs to be refreshed
-	// this function will return true and set the target to an
-	// appropriate target inside that bucket	
-	bool need_refresh(node_id& target) const;
+	node_entry const* next_refresh();
 
 	enum
 	{
+		// nodes that have not been pinged are considered failed by this flag
 		include_failed = 1
 	};
+
 	// fills the vector with the count nodes from our buckets that
 	// are nearest to the given id.
 	void find_node(node_id const& id, std::vector<node_entry>& l
@@ -133,12 +138,12 @@ public:
 	void remove_node(node_entry* n
 		, table_t::iterator bucket) ;
 	
-	int bucket_size(int bucket)
+	int bucket_size(int bucket) const
 	{
 		int num_buckets = m_buckets.size();
 		if (num_buckets == 0) return 0;
 		if (bucket < num_buckets) bucket = num_buckets - 1;
-		table_t::iterator i = m_buckets.begin();
+		table_t::const_iterator i = m_buckets.begin();
 		std::advance(i, bucket);
 		return (int)i->live_nodes.size();
 	}
@@ -148,12 +153,18 @@ public:
 
 	int bucket_size() const { return m_bucket_size; }
 
-	boost::tuple<int, int> size() const;
+	// returns the number of nodes in the main buckets, number of nodes in the
+	// replacement buckets and the number of nodes in the main buckets that have
+	// been pinged and confirmed up
+	boost::tuple<int, int, int> size() const;
+
 	size_type num_global_nodes() const;
+
+	// the number of bits down we have full buckets
+	// i.e. essentially the number of full buckets
+	// we have
+	int depth() const;
 	
-	// returns true if there are no working nodes
-	// in the routing table
-	bool need_bootstrap() const;
 	int num_active_buckets() const { return m_buckets.size(); }
 	
 	void replacement_cache(bucket_t& nodes) const;
@@ -164,22 +175,29 @@ public:
 	void print_state(std::ostream& os) const;
 #endif
 
-	void touch_bucket(node_id const& target);
+	int bucket_limit(int bucket) const;
+
+#if TORRENT_USE_INVARIANT_CHECKS
+	void check_invariant() const;
+#endif
 
 private:
 
 	table_t::iterator find_bucket(node_id const& id);
 
+	void split_bucket();
+
 	// return a pointer the node_entry with the given endpoint
 	// or 0 if we don't have such a node. Both the address and the
 	// port has to match
-	node_entry* find_node(udp::endpoint const& ep, routing_table::table_t::iterator* bucket);
+	node_entry* find_node(udp::endpoint const& ep
+		, routing_table::table_t::iterator* bucket);
+
+	dht_settings const& m_settings;
 
 	// constant called k in paper
 	int m_bucket_size;
 	
-	dht_settings const& m_settings;
-
 	// (k-bucket, replacement cache) pairs
 	// the first entry is the bucket the furthest
 	// away from our own ID. Each time the bucket
@@ -190,13 +208,9 @@ private:
 
 	node_id m_id; // our own node id
 
-	// the last time need_bootstrap() returned true
-	mutable ptime m_last_bootstrap;
-
-	// the last time the routing table was refreshed.
-	// this is used to stagger buckets needing refresh
-	// to be at least 45 seconds apart.
-	mutable ptime m_last_refresh;
+	// the last seen depth (i.e. levels in the routing table)
+	// it's mutable because it's updated by depth(), which is const
+	mutable int m_depth;
 
 	// the last time we refreshed our own bucket
 	// refreshed every 15 minutes

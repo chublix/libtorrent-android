@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2007, Arvid Norberg
+Copyright (c) 2007-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -87,6 +87,9 @@ namespace libtorrent
 		, m_queue_callback(queue_callback)
 		, m_work(io_service::work(m_ios))
 		, m_file_pool(fp)
+#if TORRENT_USE_ASSERTS
+		, m_magic(0x1337)
+#endif
 		, m_disk_io_thread(boost::bind(&disk_io_thread::thread_fun, this))
 	{
 		// don't do anything in here. Essentially all members
@@ -96,22 +99,32 @@ namespace libtorrent
 
 	disk_io_thread::~disk_io_thread()
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
+#if TORRENT_USE_ASSERTS
+		m_magic = 0xdead;
+#endif
 		TORRENT_ASSERT(m_abort == true);
 	}
 
 	void disk_io_thread::abort()
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
+
 		mutex::scoped_lock l(m_queue_mutex);
 		disk_io_job j;
 		m_waiting_to_shutdown = true;
 		j.action = disk_io_job::abort_thread;
 		j.start_time = time_now_hires();
+
+		TORRENT_ASSERT(l.locked());
 		m_jobs.insert(m_jobs.begin(), j);
 		m_signal.signal(l);
 	}
 
 	void disk_io_thread::join()
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
+
 		m_disk_io_thread.join();
 		mutex::scoped_lock l(m_queue_mutex);
 		TORRENT_ASSERT(m_abort == true);
@@ -120,12 +133,15 @@ namespace libtorrent
 
 	bool disk_io_thread::can_write() const
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
 		mutex::scoped_lock l(m_queue_mutex);
 		return !m_exceeded_write_queue;
 	}
 
 	void disk_io_thread::flip_stats(ptime now)
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
+
 		// calling mean() will actually reset the accumulators
 		m_cache_stats.average_queue_time = m_queue_time.mean();
 		m_cache_stats.average_read_time = m_read_time.mean();
@@ -139,6 +155,8 @@ namespace libtorrent
 
 	void disk_io_thread::get_cache_info(sha1_hash const& ih, std::vector<cached_piece_info>& ret) const
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
+
 		mutex::scoped_lock l(m_piece_mutex);
 		ret.clear();
 		ret.reserve(m_pieces.size());
@@ -918,7 +936,7 @@ namespace libtorrent
 		return ret;
 	}
 
-#ifdef TORRENT_DEBUG
+#if TORRENT_USE_INVARIANT_CHECKS
 	void disk_io_thread::check_invariant() const
 	{
 		int cached_write_blocks = 0;
@@ -1240,11 +1258,17 @@ namespace libtorrent
 
 	int disk_io_thread::try_read_from_cache(disk_io_job const& j, bool& hit, int flags)
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
+
 		TORRENT_ASSERT(j.buffer);
 		TORRENT_ASSERT(j.cache_min_time >= 0);
 
 		mutex::scoped_lock l(m_piece_mutex);
-		if (!m_settings.use_read_cache) return -2;
+		if (!m_settings.use_read_cache)
+		{
+			hit = false;
+			return -2;
+		}
 
 		cache_piece_index_t& idx = m_read_pieces.get<0>();
 		cache_piece_index_t::iterator p
@@ -1291,6 +1315,8 @@ namespace libtorrent
 
 	size_type disk_io_thread::queue_buffer_size() const
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
+
 		mutex::scoped_lock l(m_queue_mutex);
 		return m_queue_buffer_size;
 	}
@@ -1316,6 +1342,8 @@ namespace libtorrent
 		, mutex::scoped_lock& l
 		, boost::function<void(int, disk_io_job const&)> const& f)
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
+
 		const_cast<disk_io_job&>(j).start_time = time_now_hires();
 
 		if (j.action == disk_io_job::write)
@@ -1353,6 +1381,7 @@ namespace libtorrent
 			const_cast<disk_io_job&>(j).buffer = 0;
 		}
 */
+		TORRENT_ASSERT(l.locked());
 		m_jobs.push_back(j);
 		m_jobs.back().callback.swap(const_cast<boost::function<void(int, disk_io_job const&)>&>(f));
 
@@ -1363,17 +1392,21 @@ namespace libtorrent
 	int disk_io_thread::add_job(disk_io_job const& j
 		, boost::function<void(int, disk_io_job const&)> const& f)
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
 		TORRENT_ASSERT(!m_abort);
 		TORRENT_ASSERT(j.storage
 			|| j.action == disk_io_job::abort_thread
 			|| j.action == disk_io_job::update_settings);
 		TORRENT_ASSERT(j.buffer_size <= m_block_size);
 		mutex::scoped_lock l(m_queue_mutex);
+		TORRENT_ASSERT(m_magic == 0x1337);
 		return add_job(j, l, f);
 	}
 
 	bool disk_io_thread::test_error(disk_io_job& j)
 	{
+		TORRENT_ASSERT(m_magic == 0x1337);
+
 		TORRENT_ASSERT(j.storage);
 		error_code const& ec = j.storage->error();
 		if (ec)
@@ -1382,9 +1415,6 @@ namespace libtorrent
 			j.str.clear();
 			j.error = ec;
 			j.error_file = j.storage->error_file();
-#ifdef TORRENT_DEBUG
-			printf("ERROR: '%s' in %s\n", ec.message().c_str(), j.error_file.c_str());
-#endif
 			j.storage->clear_error();
 			return true;
 		}
@@ -1422,6 +1452,7 @@ namespace libtorrent
 		, cancel_on_abort // update_settings
 		, read_operation + cancel_on_abort // read_and_hash
 		, read_operation + cancel_on_abort // cache_piece
+		, 0 // file_priority
 #ifndef TORRENT_NO_DEPRECATE
 		, 0 // finalize_file
 #endif
@@ -1506,6 +1537,7 @@ namespace libtorrent
 			m_log << log_time() << " idle" << std::endl;
 #endif
 
+			TORRENT_ASSERT(m_magic == 0x1337);
 
 			mutex::scoped_lock jl(m_queue_mutex);
 
@@ -1559,6 +1591,9 @@ namespace libtorrent
 				// release the io_service to allow the run() call to return
 				// we do this once we stop posting new callbacks to it.
 				m_work.reset();
+
+				TORRENT_ASSERT(m_magic == 0x1337);
+
 				return;
 			}
 
@@ -1577,7 +1612,7 @@ namespace libtorrent
 			int unchoke_limit = m_settings.unchoke_slots_limit;
 			if (unchoke_limit < 0) unchoke_limit = 100;
 
-			if (m_sorted_read_jobs.size() > unchoke_limit * 2)
+			if (int(m_sorted_read_jobs.size()) > unchoke_limit * 2)
 			{
 				int range = unchoke_limit;
 				int exceed = m_sorted_read_jobs.size() - range * 2;
@@ -2202,7 +2237,7 @@ namespace libtorrent
 					if (i != idx.end())
 					{
 						TORRENT_ASSERT(i->storage);
-						int ret = flush_range(const_cast<cached_piece_entry&>(*i), 0, INT_MAX, l);
+						ret = flush_range(const_cast<cached_piece_entry&>(*i), 0, INT_MAX, l);
 						idx.erase(i);
 						if (test_error(j))
 						{
@@ -2245,8 +2280,15 @@ namespace libtorrent
 					m_log << log_time() << " move" << std::endl;
 #endif
 					TORRENT_ASSERT(j.buffer == 0);
-					ret = j.storage->move_storage_impl(j.str);
-					if (ret != 0)
+					ret = j.storage->move_storage_impl(j.str, j.piece);
+					if (ret == piece_manager::file_exist)
+					{
+						j.error = error_code(boost::system::errc::file_exists, get_system_category());
+						j.error_file = -1;
+						j.buffer = NULL;
+						break;
+					}
+					if (ret != piece_manager::no_error && ret != piece_manager::need_full_check)
 					{
 						test_error(j);
 						break;
@@ -2445,8 +2487,17 @@ namespace libtorrent
 					if (ret != 0)
 					{
 						test_error(j);
-						break;
 					}
+					break;
+				}
+				case disk_io_job::file_priority:
+				{
+					std::vector<boost::uint8_t>* p
+						= reinterpret_cast<std::vector<boost::uint8_t>*>(j.buffer);
+					j.storage->set_file_priority_impl(*p);
+					delete p;
+					ret = 0;
+					break;
 				}
 				}
 			}

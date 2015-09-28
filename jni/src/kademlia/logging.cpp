@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2011, Arvid Norberg, Magnus Jonsson
+Copyright (c) 2006-2014, Arvid Norberg & Daniel Wallin
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,31 +30,26 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#ifndef TORRENT_SIGN_HPP_INCLUDED
-#define TORRENT_SIGN_HPP_INCLUDED
+#include "libtorrent/kademlia/logging.hpp"
+#include "libtorrent/time.hpp"
 
-#include "libtorrent/config.hpp"
-#include "libtorrent/hasher.hpp"
-
-namespace libtorrent
+namespace libtorrent { namespace dht
 {
-	// both of these use SHA-1 as the message digest to be signed/verified
+	log_event::log_event(log& log) 
+		: log_(log) 
+	{
+		if (log_.enabled())
+			log_ << time_now_string() << " [" << log.id() << "] ";
+	}
 
-	// returns the size of the resulting signature
-	TORRENT_EXTRA_EXPORT int sign_rsa(sha1_hash const& digest
-		, char const* private_key, int private_len
-		, char* signature, int sig_len);
+	log_event::~log_event()
+	{
+		if (log_.enabled())
+		{
+			log_ << "\n";
+			log_.flush();
+		}
+	}
 
-	// returns true if the signature is valid
-	TORRENT_EXTRA_EXPORT bool verify_rsa(sha1_hash const& digest
-		, char const* public_key, int public_len
-		, char const* signature, int sig_len);
+}}
 
-	// returns false if it fails, for instance if the key
-	// buffers are too small. public_len and private_len
-	// are in-out values, set to the actual sizes
-	TORRENT_EXTRA_EXPORT bool generate_rsa_keys(char* public_key, int* public_len
-		, char* private_key, int* private_len, int key_size);
-}
-
-#endif // TORRENT_SIGN_HPP_INCLUDED

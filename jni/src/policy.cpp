@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2003, Arvid Norberg
+Copyright (c) 2003-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,14 +30,13 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#include "libtorrent/pch.hpp"
-
 #ifdef _MSC_VER
 #pragma warning(push, 1)
 #endif
 
 #include <boost/bind.hpp>
 #include <boost/utility.hpp>
+#include <boost/crc.hpp>
 
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -81,7 +80,7 @@ namespace
 		tcp::endpoint const& m_ep;
 	};
 
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 	struct match_peer_connection
 	{
 		match_peer_connection(peer_connection const& c) : m_conn(c) {}
@@ -115,6 +114,97 @@ namespace
 
 namespace libtorrent
 {
+
+	void apply_mask(boost::uint8_t* b, boost::uint8_t const* mask, int size)
+	{
+		for (int i = 0; i < size; ++i)
+		{
+			*b &= *mask;
+			++b;
+			++mask;
+		}
+	}
+
+	// 1. if the IP addresses are identical, hash the ports in 16 bit network-order
+	//    binary representation, ordered lowest first.
+	// 2. if the IPs are in the same /24, hash the IPs ordered, lowest first.
+	// 3. if the IPs are in the ame /16, mask the IPs by 0xffffff55, hash them
+	//    ordered, lowest first.
+	// 4. if IPs are not in the same /16, mask the IPs by 0xffff5555, hash them
+	//    ordered, lowest first.
+	//
+	// * for IPv6 peers, just use the first 64 bits and widen the masks.
+	//   like this: 0xffff5555 -> 0xffffffff55555555
+	//   the lower 64 bits are always unmasked
+	//
+	// * for IPv6 addresses, compare /32 and /48 instead of /16 and /24
+	// 
+	// * the two IP addresses that are used to calculate the rank must
+	//   always be of the same address family
+	//
+	// * all IP addresses are in network byte order when hashed
+	boost::uint32_t peer_priority(tcp::endpoint e1, tcp::endpoint e2)
+	{
+		TORRENT_ASSERT(e1.address().is_v4() == e2.address().is_v4());
+
+		using std::swap;
+
+		// this is the crc32c (Castagnoli) polynomial
+		boost::crc_optimal<32, 0x1EDC6F41, 0xFFFFFFFF, 0xFFFFFFFF, true, true> crc;
+
+		if (e1.address() == e2.address())
+		{
+			if (e1.port() > e2.port())
+				swap(e1, e2);
+			boost::uint16_t p[2];
+			p[0] = htons(e1.port());
+			p[1] = htons(e2.port());
+			crc.process_bytes((char const*)&p[0], 4);
+		}
+#if TORRENT_USE_IPV6
+		else if (e1.address().is_v6())
+		{
+			const static boost::uint8_t v6mask[][8] = {
+				{ 0xff, 0xff, 0xff, 0xff, 0x55, 0x55, 0x55, 0x55 },
+				{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x55, 0x55 },
+				{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }
+			};
+
+			if (e2 < e1) swap(e1, e2);
+			address_v6::bytes_type b1 = e1.address().to_v6().to_bytes();
+			address_v6::bytes_type b2 = e2.address().to_v6().to_bytes();
+			int mask = memcmp(&b1[0], &b2[0], 4) ? 0
+				: memcmp(&b1[0], &b2[0], 6) ? 1 : 2;
+			apply_mask(&b1[0], v6mask[mask], 8);
+			apply_mask(&b2[0], v6mask[mask], 8);
+
+			crc.process_bytes((char const*)&b1[0], 16);
+			crc.process_bytes((char const*)&b2[0], 16);
+		}
+#endif
+		else
+		{
+			const static boost::uint8_t v4mask[][4] = {
+				{ 0xff, 0xff, 0x55, 0x55 },
+				{ 0xff, 0xff, 0xff, 0x55 },
+				{ 0xff, 0xff, 0xff, 0xff }
+			};
+
+			if (e2 < e1) swap(e1, e2);
+			address_v4::bytes_type b1 = e1.address().to_v4().to_bytes();
+			address_v4::bytes_type b2 = e2.address().to_v4().to_bytes();
+			int mask = memcmp(&b1[0], &b2[0], 2) ? 0
+				: memcmp(&b1[0], &b2[0], 3) ? 1 : 2;
+			apply_mask(&b1[0], v4mask[mask], 4);
+			apply_mask(&b2[0], v4mask[mask], 4);
+
+			crc.process_bytes((char const*)&b1[0], 4);
+			crc.process_bytes((char const*)&b2[0], 4);
+		}
+
+		return crc.checksum();
+	}
+
 	// returns the rank of a peer's source. We have an affinity
 	// to connecting to peers with higher rank. This is to avoid
 	// problems when our peer list is diluted by stale peers from
@@ -149,7 +239,17 @@ namespace libtorrent
 
 		TORRENT_ASSERT(t.valid_metadata());
 		TORRENT_ASSERT(c.peer_info_struct() != 0 || c.type() != peer_connection::bittorrent_connection);
-		int num_requests = c.desired_queue_size()
+
+		bool time_critical_mode = t.num_time_critical_pieces() > 0;
+
+		int desired_queue_size = c.desired_queue_size();
+
+		// in time critical mode, only have 1 outstanding request at a time
+		// via normal requests
+		if (time_critical_mode)
+			desired_queue_size = (std::min)(1, desired_queue_size);
+
+		int num_requests = desired_queue_size
 			- (int)c.download_queue().size()
 			- (int)c.request_queue().size();
 
@@ -167,7 +267,7 @@ namespace libtorrent
 
 		int prefer_whole_pieces = c.prefer_whole_pieces();
 
-		if (prefer_whole_pieces == 0)
+		if (prefer_whole_pieces == 0 && !time_critical_mode)
 		{
 			prefer_whole_pieces = c.statistics().download_payload_rate()
 				* t.settings().whole_pieces_threshold
@@ -236,9 +336,11 @@ namespace libtorrent
 		// and we're not strictly speaking in end-game mode yet
 		// also, if we already have at least one outstanding
 		// request, we shouldn't pick any busy pieces either
-		bool dont_pick_busy_blocks = (ses.m_settings.strict_end_game_mode
+		// in time critical mode, it's OK to request busy blocks
+		bool dont_pick_busy_blocks = ((ses.m_settings.strict_end_game_mode
 			&& p.num_downloading_pieces() < p.num_want_left())
-			|| dq.size() + rq.size() > 0;
+			|| dq.size() + rq.size() > 0)
+			&& !time_critical_mode;
 
 		// this is filled with an interesting piece
 		// that some other peer is currently downloading
@@ -252,6 +354,13 @@ namespace libtorrent
 #endif
 
 			if (prefer_whole_pieces == 0 && num_requests <= 0) break;
+
+			if (time_critical_mode && p.piece_priority(i->piece_index) != 7)
+			{
+				// assume the subsequent pieces are not prio 7 and
+				// be done
+				break;
+			}
 
 			int num_block_requests = p.num_peers(*i);
 			if (num_block_requests > 0)
@@ -352,6 +461,13 @@ namespace libtorrent
 		, m_finished(false)
 	{ TORRENT_ASSERT(t); }
 
+	void policy::clear_peer_prio()
+	{
+		for (peers_t::iterator i = m_peers.begin()
+			, end(m_peers.end()); i != end; ++i)
+			(*i)->peer_rank = 0;
+	}
+
 	// disconnects and removes all peers that are now filtered
 	void policy::ip_filter_updated()
 	{
@@ -375,7 +491,8 @@ namespace libtorrent
 			}
 		
 			if (ses.m_alerts.should_post<peer_blocked_alert>())
-				ses.m_alerts.post_alert(peer_blocked_alert(m_torrent->get_handle(), (*i)->address()));
+				ses.m_alerts.post_alert(peer_blocked_alert(m_torrent->get_handle()
+					, (*i)->address(), peer_blocked_alert::ip_filter));
 
 			int current = i - m_peers.begin();
 			TORRENT_ASSERT(current >= 0);
@@ -391,7 +508,7 @@ namespace libtorrent
 				
 				p->disconnect(errors::banned_by_ip_filter);
 				// what *i refers to has changed, i.e. cur was deleted
-				if (m_peers.size() < count)
+				if (int(m_peers.size()) < count)
 				{
 					i = m_peers.begin() + current;
 					continue;
@@ -439,7 +556,7 @@ namespace libtorrent
 		if (m_round_robin > i - m_peers.begin()) --m_round_robin;
 		if (m_round_robin >= int(m_peers.size())) m_round_robin = 0;
 
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 		TORRENT_ASSERT((*i)->in_use);
 		(*i)->in_use = false;
 #endif
@@ -651,17 +768,8 @@ namespace libtorrent
 		TORRENT_ASSERT(m_finished == m_torrent->is_finished());
 
 		int min_reconnect_time = m_torrent->settings().min_reconnect_time;
-		address external_ip = m_torrent->session().external_address();
-
-		// don't bias any particular peers when seeding
-		if (m_finished || external_ip == address())
-		{
-			// set external_ip to a random value, to
-			// radomize which peers we prefer
-			address_v4::bytes_type bytes;
-			std::generate(bytes.begin(), bytes.end(), &random);
-			external_ip = address_v4(bytes);
-		}
+		external_ip const& external = m_torrent->session().external_address();
+		int external_port = m_torrent->session().listen_port();
 
 		if (m_round_robin >= int(m_peers.size())) m_round_robin = 0;
 
@@ -728,7 +836,7 @@ namespace libtorrent
 			// pe, which is the peer m_round_robin points to. If it is, just
 			// keep looking.
 			if (candidate != -1
-				&& compare_peer(*m_peers[candidate], pe, external_ip)) continue;
+				&& compare_peer(*m_peers[candidate], pe, external, external_port)) continue;
 
 			if (pe.last_connected
 				&& session_time - pe.last_connected <
@@ -750,8 +858,9 @@ namespace libtorrent
 			(*m_torrent->session().m_logger) << time_now_string()
 				<< " *** FOUND CONNECTION CANDIDATE ["
 				" ip: " << m_peers[candidate]->ip() <<
-				" d: " << cidr_distance(external_ip, m_peers[candidate]->address()) <<
-				" external: " << external_ip <<
+				" d: " << cidr_distance(external.external_address(m_peers[candidate]->address()), m_peers[candidate]->address()) <<
+				" rank: " << m_peers[candidate]->rank(external, external_port) <<
+				" external: " << external.external_address(m_peers[candidate]->address()) <<
 				" t: " << (session_time - m_peers[candidate]->last_connected) <<
 				" ]\n";
 		}
@@ -821,7 +930,9 @@ namespace libtorrent
 //			|| (iter != m_peers.end() && c.remote().address() < (*iter)->address())
 //			|| (iter != m_peers.end() && iter != m_peers.begin() && (*(iter-1))->address() < c.remote().address()));
 
+#if !defined TORRENT_DISABLE_GEO_IP || TORRENT_LOGGING || defined TORRENT_VERBOSE_LOGGING
 		aux::session_impl& ses = m_torrent->session();
+#endif
 
 		if (found)
 		{
@@ -958,7 +1069,13 @@ namespace libtorrent
 			error_code ec;
 			TORRENT_ASSERT(c.remote() == c.get_socket()->remote_endpoint(ec) || ec);
 
-			if (int(m_peers.size()) >= m_torrent->settings().max_peerlist_size)
+			// max peerlist size 0 means infinite
+			int max_peerlist_size = m_torrent->is_paused()
+				? m_torrent->settings().max_paused_peerlist_size
+				: m_torrent->settings().max_peerlist_size;
+
+			if (max_peerlist_size
+				&& int(m_peers.size()) >= max_peerlist_size)
 			{
 				// this may invalidate our iterator!
 				erase_peers(force_erase);
@@ -1010,7 +1127,7 @@ namespace libtorrent
 #endif
 				new (p) ipv4_peer(c.remote(), false, 0);
 
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 			p->in_use = true;
 #endif
 
@@ -1314,13 +1431,13 @@ namespace libtorrent
 			m_torrent->session().m_i2p_peer_pool.set_next_size(500);
 			new (p) i2p_peer(destination, true, src);
 
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 			p->in_use = true;
 #endif
 
 			if (!insert_peer(p, iter, flags))
 			{
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 				p->in_use = false;
 #endif
 
@@ -1362,7 +1479,8 @@ namespace libtorrent
 		if (!ses.m_settings.allow_i2p_mixed && m_torrent->torrent_file().is_i2p())
 		{
 			if (ses.m_alerts.should_post<peer_blocked_alert>())
-				ses.m_alerts.post_alert(peer_blocked_alert(m_torrent->get_handle(), remote.address()));
+				ses.m_alerts.post_alert(peer_blocked_alert(m_torrent->get_handle()
+					, remote.address(), peer_blocked_alert::ip_filter));
 			return 0;
 		}
 
@@ -1370,7 +1488,8 @@ namespace libtorrent
 		if (pf.access(remote.port()) & port_filter::blocked)
 		{
 			if (ses.m_alerts.should_post<peer_blocked_alert>())
-				ses.m_alerts.post_alert(peer_blocked_alert(m_torrent->get_handle(), remote.address()));
+				ses.m_alerts.post_alert(peer_blocked_alert(m_torrent->get_handle()
+					, remote.address(), peer_blocked_alert::port_filter));
 #ifndef TORRENT_DISABLE_EXTENSIONS
 			m_torrent->notify_extension_add_peer(remote, src, torrent_plugin::filtered);
 #endif
@@ -1380,7 +1499,8 @@ namespace libtorrent
 		if (ses.m_settings.no_connect_privileged_ports && remote.port() < 1024)
 		{
 			if (ses.m_alerts.should_post<peer_blocked_alert>())
-				ses.m_alerts.post_alert(peer_blocked_alert(m_torrent->get_handle(), remote.address()));
+				ses.m_alerts.post_alert(peer_blocked_alert(m_torrent->get_handle()
+					, remote.address(), peer_blocked_alert::privileged_ports));
 #ifndef TORRENT_DISABLE_EXTENSIONS
 			m_torrent->notify_extension_add_peer(remote, src, torrent_plugin::filtered);
 #endif
@@ -1392,7 +1512,8 @@ namespace libtorrent
 			&& (ses.m_ip_filter.access(remote.address()) & ip_filter::blocked))
 		{
 			if (ses.m_alerts.should_post<peer_blocked_alert>())
-				ses.m_alerts.post_alert(peer_blocked_alert(m_torrent->get_handle(), remote.address()));
+				ses.m_alerts.post_alert(peer_blocked_alert(m_torrent->get_handle()
+					, remote.address(), peer_blocked_alert::ip_filter));
 #ifndef TORRENT_DISABLE_EXTENSIONS
 			m_torrent->notify_extension_add_peer(remote, src, torrent_plugin::filtered);
 #endif
@@ -1447,13 +1568,13 @@ namespace libtorrent
 #endif
 				new (p) ipv4_peer(remote, true, src);
 
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 			p->in_use = true;
 #endif
 
 			if (!insert_peer(p, iter, flags))
 			{
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 				p->in_use = false;
 #endif
 #if TORRENT_USE_IPV6
@@ -1615,7 +1736,7 @@ namespace libtorrent
 		}
 	}
 
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 	bool policy::has_connection(const peer_connection* c)
 	{
 		INVARIANT_CHECK;
@@ -1637,7 +1758,7 @@ namespace libtorrent
 	}
 #endif
 
-#ifdef TORRENT_DEBUG
+#if TORRENT_USE_INVARIANT_CHECKS
 	void policy::check_invariant() const
 	{
 		TORRENT_ASSERT(m_num_connect_candidates >= 0);
@@ -1765,6 +1886,7 @@ namespace libtorrent
 		: prev_amount_upload(0)
 		, prev_amount_download(0)
 		, connection(0)
+		, peer_rank(0)
 #ifndef TORRENT_DISABLE_GEO_IP
 		, inet_as(0)
 #endif
@@ -1803,11 +1925,21 @@ namespace libtorrent
 		, confirmed_supports_utp(false)
 		, supports_holepunch(false)
 		, web_seed(false)
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
+#if TORRENT_USE_ASSERTS
 		, in_use(false)
 #endif
 	{
 		TORRENT_ASSERT((src & 0xff) == src);
+	}
+
+	// TOOD: pass in both an IPv6 and IPv4 address here
+	boost::uint32_t policy::peer::rank(external_ip const& external, int external_port) const
+	{
+		if (peer_rank == 0)
+			peer_rank = peer_priority(
+				tcp::endpoint(external.external_address(this->address()), external_port)
+				, tcp::endpoint(this->address(), this->port));
+		return peer_rank;
 	}
 
 	size_type policy::peer::total_download() const
@@ -1861,7 +1993,7 @@ namespace libtorrent
 
 	// this returns true if lhs is a better connect candidate than rhs
 	bool policy::compare_peer(policy::peer const& lhs, policy::peer const& rhs
-		, address const& external_ip) const
+		, external_ip const& external, int external_port) const
 	{
 		// prefer peers with lower failcount
 		if (lhs.failcount != rhs.failcount)
@@ -1888,9 +2020,9 @@ namespace libtorrent
 			if (lhs_as != rhs_as) return lhs_as > rhs_as;
 		}
 #endif
-		int lhs_distance = cidr_distance(external_ip, lhs.address());
-		int rhs_distance = cidr_distance(external_ip, rhs.address());
-		if (lhs_distance < rhs_distance) return true;
+		boost::uint32_t lhs_peer_rank = lhs.rank(external, external_port);
+		boost::uint32_t rhs_peer_rank = rhs.rank(external, external_port);
+		if (lhs_peer_rank > rhs_peer_rank) return true;
 		return false;
 	}
 }

@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2006, Arvid Norberg
+Copyright (c) 2006-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -43,6 +43,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/kademlia/node_id.hpp>
 #include <libtorrent/kademlia/msg.hpp>
 #include <libtorrent/kademlia/find_data.hpp>
+#include <libtorrent/kademlia/item.hpp>
 
 #include <libtorrent/io.hpp>
 #include <libtorrent/session_settings.hpp>
@@ -57,6 +58,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 namespace libtorrent {
 	class alert_manager;
+	struct alert_dispatcher;
 }
 
 namespace libtorrent { namespace dht
@@ -67,6 +69,7 @@ TORRENT_DECLARE_LOG(node);
 #endif
 
 struct traversal_algorithm;
+struct dht_observer;
 
 struct key_desc_t
 {
@@ -101,8 +104,8 @@ bool TORRENT_EXTRA_EXPORT verify_message(lazy_entry const* msg, key_desc_t const
 // to remove stale peers
 struct peer_entry
 {
-	tcp::endpoint addr;
 	ptime added;
+	tcp::endpoint addr;
 	bool seed;
 };
 
@@ -130,20 +133,24 @@ struct dht_immutable_item
 	int size;
 };
 
-struct rsa_key { char bytes[268]; };
+struct ed25519_public_key { char bytes[item_pk_len]; };
 
 struct dht_mutable_item : dht_immutable_item
 {
-	char sig[256];
-	int seq;
-	rsa_key key;
+	char sig[item_sig_len];
+	boost::uint64_t seq;
+	ed25519_public_key key;
+	char* salt;
+	int salt_size;
 };
 
-inline bool operator<(rsa_key const& lhs, rsa_key const& rhs)
+// internal
+inline bool operator<(ed25519_public_key const& lhs, ed25519_public_key const& rhs)
 {
 	return memcmp(lhs.bytes, rhs.bytes, sizeof(lhs.bytes)) < 0;
 }
 
+// internal
 inline bool operator<(peer_entry const& lhs, peer_entry const& rhs)
 {
 	return lhs.addr.address() == rhs.addr.address()
@@ -174,7 +181,12 @@ struct count_peers
 		count += t.second.peers.size();
 	}
 };
-	
+
+struct udp_socket_interface
+{
+	virtual bool send_packet(entry& e, udp::endpoint const& addr, int flags) = 0;
+};
+
 class TORRENT_EXTRA_EXPORT node_impl : boost::noncopyable
 {
 typedef std::map<node_id, torrent_entry> table_t;
@@ -182,17 +194,13 @@ typedef std::map<node_id, dht_immutable_item> dht_immutable_table_t;
 typedef std::map<node_id, dht_mutable_item> dht_mutable_table_t;
 
 public:
-	typedef boost::function3<void, address, int, address> external_ip_fun;
-
-	node_impl(libtorrent::alert_manager& alerts
-		, bool (*f)(void*, entry&, udp::endpoint const&, int)
-		, dht_settings const& settings, node_id nid, address const& external_address
-		, external_ip_fun ext_ip, void* userdata);
+	node_impl(alert_dispatcher* alert_disp, udp_socket_interface* sock
+		, libtorrent::dht_settings const& settings, node_id nid, address const& external_address
+		, dht_observer* observer);
 
 	virtual ~node_impl() {}
 
 	void tick();
-	void refresh(node_id const& id, find_data::nodes_callback const& f);
 	void bootstrap(std::vector<udp::endpoint> const& nodes
 		, find_data::nodes_callback const& f);
 	void add_router_node(udp::endpoint router);
@@ -212,7 +220,7 @@ public:
 
 	node_id const& nid() const { return m_id; }
 
-	boost::tuple<int, int> size() const{ return m_table.size(); }
+	boost::tuple<int, int, int> size() const { return m_table.size(); }
 	size_type num_global_nodes() const
 	{ return m_table.num_global_nodes(); }
 
@@ -223,8 +231,12 @@ public:
 	{ m_table.print_state(os); }
 #endif
 
-	void announce(sha1_hash const& info_hash, int listen_port, bool seed
+	enum flags_t { flag_seed = 1, flag_implied_port = 2 };
+	void announce(sha1_hash const& info_hash, int listen_port, int flags
 		, boost::function<void(std::vector<tcp::endpoint> const&)> f);
+
+	void get_item(sha1_hash const& target, boost::function<bool(item&)> f);
+	void get_item(char const* pk, std::string const& salt, boost::function<bool(item&)> f);
 
 	bool verify_token(std::string const& token, char const* info_hash
 		, udp::endpoint const& addr);
@@ -262,16 +274,18 @@ public:
 
 	void status(libtorrent::session_status& s);
 
-	dht_settings const& settings() const { return m_settings; }
+	libtorrent::dht_settings const& settings() const { return m_settings; }
 
 protected:
 
-	void lookup_peers(sha1_hash const& info_hash, int prefix, entry& reply
+	void send_single_refresh(udp::endpoint const& ep, int bucket
+		, node_id const& id = node_id());
+	void lookup_peers(sha1_hash const& info_hash, entry& reply
 		, bool noseed, bool scrape) const;
 	bool lookup_torrents(sha1_hash const& target, entry& reply
 		, char* tags) const;
 
-	dht_settings const& m_settings;
+	libtorrent::dht_settings const& m_settings;
 	
 private:
 	typedef libtorrent::mutex mutex_t;
@@ -290,7 +304,7 @@ public:
 	rpc_manager m_rpc;
 
 private:
-	external_ip_fun m_ext_ip;
+	dht_observer* m_observer;
 
 	table_t m_map;
 	dht_immutable_table_t m_immutable_table;
@@ -298,12 +312,15 @@ private:
 	
 	ptime m_last_tracker_tick;
 
+	// the last time we issued a bootstrap or a refresh on our own ID, to expand
+	// the routing table buckets close to us.
+	ptime m_last_self_refresh;
+
 	// secret random numbers used to create write tokens
 	int m_secret[2];
 
-	libtorrent::alert_manager& m_alerts;
-	bool (*m_send)(void*, entry&, udp::endpoint const&, int);
-	void* m_userdata;
+	alert_dispatcher* m_post_alert;
+	udp_socket_interface* m_sock;
 };
 
 

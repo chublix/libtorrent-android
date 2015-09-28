@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2006, Arvid Norberg
+Copyright (c) 2006-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -32,7 +32,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <boost/version.hpp>
 #include <boost/bind.hpp>
-#include "libtorrent/pch.hpp"
 #include "libtorrent/assert.hpp"
 #include "libtorrent/file_pool.hpp"
 #include "libtorrent/error_code.hpp"
@@ -48,7 +47,8 @@ namespace libtorrent
 		, m_stop_thread(false)
 		, m_closer_thread(boost::bind(&file_pool::closer_thread_fun, this))
 #endif
-	{}
+	{
+	}
 
 	file_pool::~file_pool()
 	{
@@ -83,10 +83,10 @@ namespace libtorrent
 			if (i == m_queued_for_close.end())
 			{
 				l.unlock();
-				// none of the files are ready to be closet yet
+				// none of the files are ready to be closed yet
 				// because they're still in use by other threads
 				// hold off for a while
-				sleep(1000);
+				sleep(100);
 			}
 			else
 			{
@@ -101,15 +101,82 @@ namespace libtorrent
 	}
 #endif
 
+#ifdef TORRENT_WINDOWS
+	void set_low_priority(boost::intrusive_ptr<file> const& f)
+	{
+		// file prio is only supported on vista and up
+		// so load the functions dynamically
+		typedef enum _FILE_INFO_BY_HANDLE_CLASS {
+			FileBasicInfo,
+			FileStandardInfo,
+			FileNameInfo,
+			FileRenameInfo,
+			FileDispositionInfo,
+			FileAllocationInfo,
+			FileEndOfFileInfo,
+			FileStreamInfo,
+			FileCompressionInfo,
+			FileAttributeTagInfo,
+			FileIdBothDirectoryInfo,
+			FileIdBothDirectoryRestartInfo,
+			FileIoPriorityHintInfo,
+			FileRemoteProtocolInfo, 
+			MaximumFileInfoByHandleClass
+		} FILE_INFO_BY_HANDLE_CLASS, *PFILE_INFO_BY_HANDLE_CLASS;
+
+		typedef enum _PRIORITY_HINT {
+			IoPriorityHintVeryLow = 0,
+			IoPriorityHintLow,
+			IoPriorityHintNormal,
+			MaximumIoPriorityHintType
+		} PRIORITY_HINT;
+
+		typedef struct _FILE_IO_PRIORITY_HINT_INFO {
+			PRIORITY_HINT PriorityHint;
+		} FILE_IO_PRIORITY_HINT_INFO, *PFILE_IO_PRIORITY_HINT_INFO;
+
+		typedef BOOL (WINAPI *SetFileInformationByHandle_t)(HANDLE hFile, FILE_INFO_BY_HANDLE_CLASS FileInformationClass, LPVOID lpFileInformation, DWORD dwBufferSize);
+		static SetFileInformationByHandle_t SetFileInformationByHandle = NULL;
+
+		static bool failed_kernel_load = false;
+
+		if (failed_kernel_load) return;
+
+		if (SetFileInformationByHandle == NULL)
+		{
+			HMODULE kernel32 = LoadLibraryA("kernel32.dll");
+			if (kernel32 == NULL)
+			{
+				failed_kernel_load = true;
+				return;
+			}
+
+			SetFileInformationByHandle = (SetFileInformationByHandle_t)GetProcAddress(kernel32, "SetFileInformationByHandle");
+			if (SetFileInformationByHandle == NULL)
+			{ 
+				failed_kernel_load = true;
+				return;
+			}
+		}
+
+		TORRENT_ASSERT(SetFileInformationByHandle);
+
+		FILE_IO_PRIORITY_HINT_INFO io_hint;
+		io_hint.PriorityHint = IoPriorityHintLow;
+		SetFileInformationByHandle(f->native_handle(),
+			FileIoPriorityHintInfo, &io_hint, sizeof(io_hint));
+	}
+#endif // TORRENT_WINDOWS
+
 	boost::intrusive_ptr<file> file_pool::open_file(void* st, std::string const& p
-		, file_storage::iterator fe, file_storage const& fs, int m, error_code& ec)
+		, int file_index, file_storage const& fs, int m, error_code& ec)
 	{
 		TORRENT_ASSERT(st != 0);
 		TORRENT_ASSERT(is_complete(p));
 		TORRENT_ASSERT((m & file::rw_mask) == file::read_only
 			|| (m & file::rw_mask) == file::read_write);
 		mutex::scoped_lock l(m_mutex);
-		file_set::iterator i = m_files.find(std::make_pair(st, fs.file_index(*fe)));
+		file_set::iterator i = m_files.find(std::make_pair(st, file_index));
 		if (i != m_files.end())
 		{
 			lru_file_entry& e = i->second;
@@ -147,24 +214,15 @@ namespace libtorrent
 #else
 				e.file_ptr->close();
 #endif
-				std::string full_path = combine_path(p, fs.file_path(*fe));
+				std::string full_path = fs.file_path(file_index, p);
 				if (!e.file_ptr->open(full_path, m, ec))
 				{
 					m_files.erase(i);
 					return boost::intrusive_ptr<file>();
 				}
 #ifdef TORRENT_WINDOWS
-// file prio is supported on vista and up
-#if _WIN32_WINNT >= 0x0600
 				if (m_low_prio_io)
-				{
-					// TODO: load this function dynamically from Kernel32.dll
-					FILE_IO_PRIORITY_HINT_INFO priorityHint;
-					priorityHint.PriorityHint = IoPriorityHintLow;
-					SetFileInformationByHandle(e.file_ptr->native_handle(),
-						FileIoPriorityHintInfo, &priorityHint, sizeof(priorityHint));
-				}
-#endif
+					set_low_priority(e.file_ptr);
 #endif
 				TORRENT_ASSERT(e.file_ptr->is_open());
 				e.mode = m;
@@ -186,12 +244,16 @@ namespace libtorrent
 			ec = error_code(ENOMEM, get_posix_category());
 			return e.file_ptr;
 		}
-		std::string full_path = combine_path(p, fs.file_path(*fe));
+		std::string full_path = fs.file_path(file_index, p);
 		if (!e.file_ptr->open(full_path, m, ec))
 			return boost::intrusive_ptr<file>();
+#ifdef TORRENT_WINDOWS
+		if (m_low_prio_io)
+			set_low_priority(e.file_ptr);
+#endif
 		e.mode = m;
 		e.key = st;
-		m_files.insert(std::make_pair(std::make_pair(st, fs.file_index(*fe)), e));
+		m_files.insert(std::make_pair(std::make_pair(st, file_index), e));
 		TORRENT_ASSERT(e.file_ptr->is_open());
 		return e.file_ptr;
 	}
@@ -204,9 +266,9 @@ namespace libtorrent
 		if (i == m_files.end()) return;
 
 #if TORRENT_CLOSE_MAY_BLOCK
-		mutex::scoped_lock l(m_closer_mutex);
+		mutex::scoped_lock l_(m_closer_mutex);
 		m_queued_for_close.push_back(i->second.file_ptr);
-		l.unlock();
+		l_.unlock();
 #endif
 		m_files.erase(i);
 	}
@@ -249,6 +311,7 @@ namespace libtorrent
 	void file_pool::resize(int size)
 	{
 		TORRENT_ASSERT(size > 0);
+
 		if (size == m_size) return;
 		mutex::scoped_lock l(m_mutex);
 		m_size = size;

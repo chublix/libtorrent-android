@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2010, Arvid Norberg
+Copyright (c) 2010-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -369,39 +369,6 @@ void feed::on_feed(error_code const& ec
 
 	time_t now = time(NULL);
 
-	if (m_settings.auto_download || m_settings.auto_map_handles)
-	{
-		for (std::vector<feed_item>::iterator i = m_items.begin()
-			, end(m_items.end()); i != end; ++i)
-		{
-			i->handle = torrent_handle(m_ses.find_torrent(i->uuid.empty() ? i->url : i->uuid));
-
-			// if we're already downloading this torrent, or if we
-			// don't have auto-download enabled, just move along to
-			// the next one
-			if (i->handle.is_valid() || !m_settings.auto_download) continue;
-
-			// has this already been added?
-			if (m_added.find(i->url) != m_added.end()) continue;
-
-			// this means we should add this torrent to the session
-			add_torrent_params p = m_settings.add_args;
-			p.url = i->url;
-			p.uuid = i->uuid;
-			p.source_feed_url = m_settings.url;
-			p.ti.reset();
-			p.info_hash.clear();
-			p.name = i->title.c_str();
-
-			error_code e;
-			torrent_handle h = m_ses.add_torrent(p, e);
-			m_ses.m_alerts.post_alert(add_torrent_alert(h, p, e));
-			m_added.insert(make_pair(i->url, now));
-		}
-	}
-
-	m_last_update = now;
-
 	// keep history of the typical feed size times 5
 	int max_history = (std::max)(s.num_items * 5, 100);
 
@@ -417,6 +384,8 @@ void feed::on_feed(error_code const& ec
 		m_added.erase(i);
 	}
 
+	m_last_update = now;
+
 	// report that we successfully updated the feed
 	if (m_ses.m_alerts.should_post<rss_alert>())
 	{
@@ -428,6 +397,11 @@ void feed::on_feed(error_code const& ec
 	// now that we have updated our timestamp
 	m_ses.update_rss_feeds();
 }
+
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
 
 #define TORRENT_SETTING(t, x) {#x, offsetof(feed_settings,x), t},
 	bencode_map_entry feed_settings_map[] =
@@ -469,6 +443,10 @@ void feed::on_feed(error_code const& ec
 		TORRENT_SETTING(size_integer, flags)
 	};
 #undef TORRENT_SETTING
+
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
 
 void feed::load_state(lazy_entry const& rd)
 {
@@ -566,6 +544,41 @@ void feed::add_item(feed_item const& item)
 
 	m_urls.insert(item.url);
 	m_items.push_back(item);
+
+	feed_item& i = m_items.back();
+
+	if (m_settings.auto_map_handles)
+		i.handle = torrent_handle(m_ses.find_torrent(i.uuid.empty() ? i.url : i.uuid));
+
+	if (m_ses.m_alerts.should_post<rss_item_alert>())
+		m_ses.m_alerts.post_alert(rss_item_alert(my_handle(), i));
+
+	if (m_settings.auto_download)
+	{
+		if (!m_settings.auto_map_handles)
+			i.handle = torrent_handle(m_ses.find_torrent(i.uuid.empty() ? i.url : i.uuid));
+
+		// if we're already downloading this torrent
+		// move along to the next one
+		if (i.handle.is_valid()) return;
+
+		// has this already been added?
+		if (m_added.find(i.url) != m_added.end()) return;
+
+		// this means we should add this torrent to the session
+		add_torrent_params p = m_settings.add_args;
+		p.url = i.url;
+		p.uuid = i.uuid;
+		p.source_feed_url = m_settings.url;
+		p.ti.reset();
+		p.info_hash.clear();
+		p.name = i.title.c_str();
+
+		error_code e;
+		m_ses.add_torrent(p, e);
+		time_t now = time(NULL);
+		m_added.insert(make_pair(i.url, now));
+	}
 }
 
 // returns the number of seconds until trying again
@@ -608,14 +621,14 @@ void feed::get_feed_status(feed_status* ret) const
 
 int feed::next_update(time_t now) const
 {
-	if (m_last_update == 0) return m_last_attempt + 60 * 5 - now;
+	if (m_last_update == 0) return int(m_last_attempt + 60 * 5 - now);
 	int ttl = m_ttl == -1 ? m_settings.default_ttl : m_ttl;
 	TORRENT_ASSERT((m_last_update + ttl * 60) - now < INT_MAX);
 	return int((m_last_update + ttl * 60) - now);
 }
 
 // defined in session.cpp
-void fun_wrap(bool* done, condition* e, mutex* m, boost::function<void(void)> f);
+void fun_wrap(bool* done, condition_variable* e, mutex* m, boost::function<void(void)> f);
 
 #define TORRENT_ASYNC_CALL(x) \
 	boost::shared_ptr<feed> f = m_feed_ptr.lock(); \
@@ -656,7 +669,7 @@ feed_status feed_handle::get_feed_status() const
 
 void feed_handle::set_settings(feed_settings const& s)
 {
-	TORRENT_SYNC_CALL1(set_settings, s);
+	TORRENT_ASYNC_CALL1(set_settings, s);
 }
 
 feed_settings feed_handle::settings() const
@@ -666,5 +679,5 @@ feed_settings feed_handle::settings() const
 	return ret;
 }
 
-};
+}
 

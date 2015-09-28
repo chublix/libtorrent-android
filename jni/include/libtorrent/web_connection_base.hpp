@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2003, Arvid Norberg
+Copyright (c) 2003-2014, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -95,10 +95,7 @@ namespace libtorrent
 			, boost::weak_ptr<torrent> t
 			, boost::shared_ptr<socket_type> s
 			, tcp::endpoint const& remote
-			, std::string const& url
-			, policy::peer* peerinfo
-			, std::string const& ext_auth
-			, web_seed_entry::headers_t const& ext_headers);
+			, web_seed_entry& web);
 		void start();
 
 		~web_connection_base();
@@ -119,8 +116,7 @@ namespace libtorrent
 		void write_interested() {}
 		void write_not_interested() {}
 		virtual void write_request(peer_request const& r) = 0;
-		void write_cancel(peer_request const& r)
-		{ incoming_reject_request(r); }
+		void write_cancel(peer_request const& r) {}
 		void write_have(int index) {}
 		void write_piece(peer_request const& r, disk_buffer_holder& buffer) { TORRENT_ASSERT(false); }
 		void write_keepalive() {}
@@ -129,7 +125,7 @@ namespace libtorrent
 		void write_allow_fast(int) {}
 		void write_suggest(int piece) {}
 
-#ifdef TORRENT_DEBUG
+#if TORRENT_USE_INVARIANT_CHECKS
 		void check_invariant() const;
 #endif
 
