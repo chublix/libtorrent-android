@@ -23,7 +23,8 @@ LOCAL_CFLAGS := -DBOOST_ASIO_HASH_MAP_BUCKETS=1021 \
 				-DTORRENT_USE_ICONV=0 \
 				-DTORRENT_USE_TOMMATH 
 
-LOCAL_C_INCLUDES := $(LOCAL_PATH)/include  
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/include \
+					$(LOCAL_PATH)/ed25519/src
 
 LOCAL_SRC_FILES := 	src/ConvertUTF.cpp \
 					src/GeoIP.c \
@@ -120,7 +121,17 @@ LOCAL_SRC_FILES := 	src/ConvertUTF.cpp \
 					src/kademlia/refresh.cpp \
 					src/kademlia/routing_table.cpp \
 					src/kademlia/rpc_manager.cpp \
-					src/kademlia/traversal_algorithm.cpp 
+					src/kademlia/traversal_algorithm.cpp \
+					ed25519/src/add_scalar.cpp \
+					ed25519/src/fe.cpp \
+					ed25519/src/ge.cpp \
+					ed25519/src/key_exchange.cpp \
+					ed25519/src/keypair.cpp \
+					ed25519/src/sc.cpp \
+					ed25519/src/seed.cpp \
+					ed25519/src/sha512.cpp \
+					ed25519/src/sign.cpp \
+					ed25519/src/verify.cpp
 					
 LOCAL_STATIC_LIBRARIES := libboost_system-gcc-mt-1_53 \
 						  libboost_filesystem-gcc-mt-1_53 
